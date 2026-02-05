@@ -35,13 +35,13 @@ export class CleanupManager {
         }
 
         const sessionIds = oldSessions.map(session => session.sessionId);
-
+        
         const [sessionResult, messageResult, reportResult] = await Promise.all([
             this.collections.sessions.deleteMany({ sessionId: { $in: sessionIds } }),
             this.collections.messages.deleteMany({ sessionId: { $in: sessionIds } }),
             this.collections.reports.deleteMany({ sessionId: { $in: sessionIds } })
         ]);
-
+        
         return {
             sessionsDeleted: sessionResult.deletedCount ?? 0,
             messagesDeleted: messageResult.deletedCount ?? 0,
