@@ -5,6 +5,7 @@ import { Collections } from '../database/Collections';
 import { UserManager, CounselorManager, SessionManager, ReportingSystem, StatisticsManager, CleanupManager, AuditLogManager } from '../managers';
 import { Session } from '../types/Session';
 import { UserState } from '../types/User';
+import { generateAppealId } from '../models/utils';
 import { logger } from '../utils/logger';
 
 // Bot Handler Component - Central message routing and command processing
@@ -39,6 +40,8 @@ export class BotHandler {
     private static readonly MENU_PENDING_REPORTS = '🚩 Pending Reports';
     private static readonly MENU_PROCESS_REPORT = '⚙️ Process Report';
     private static readonly MENU_COUNSELOR_LIST = '🧑‍⚕️ Counselors List';
+    private static readonly MENU_APPEAL = '📝 Appeal';
+    private static readonly MENU_APPEALS = '🧾 Appeals';
     private static readonly MENU_APPROVE_COUNSELOR = '✅ Approve Counselor';
     private static readonly MENU_REMOVE_COUNSELOR = '🗑️ Remove Counselor';
     private static readonly MENU_AUDIT_LOG = '📜 Audit Log';
@@ -49,6 +52,7 @@ export class BotHandler {
     private static readonly PROCESS_REPORT_ACTION_PREFIX = 'pr';
     private static readonly REVOKE_SUSPENSION_ACTION_PREFIX = 'rs';
     private static readonly REAPPROVE_ACTION_PREFIX = 'ap';
+    private static readonly APPEAL_ACTION_PREFIX = 'al';
 
     constructor(config: AppConfig) {
         this.config = config;
@@ -205,6 +209,16 @@ export class BotHandler {
             await this.handleCounselorList(ctx);
         });
 
+        bot.hears(BotHandler.MENU_APPEAL, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleAppealStart(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_APPEALS, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleAppeals(ctx);
+        });
+
         bot.hears(BotHandler.MENU_APPROVE_COUNSELOR, async ctx => {
             if (!ctx.chat) return;
             await this.handleApproveCounselor(ctx);
@@ -263,6 +277,15 @@ export class BotHandler {
             const actionToken = match[2];
             const action = actionToken === 's' ? 'strike' : 'dismiss';
             await this.processReportAction(ctx, reportId, action);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.APPEAL_ACTION_PREFIX}:(.+):(r|a)$`), async ctx => {
+            if (!ctx.chat) return;
+            const match = ctx.match as RegExpMatchArray;
+            const appealId = match[1];
+            const actionToken = match[2];
+            const action = actionToken === 'r' ? 'revoke' : 'approve';
+            await this.processAppealAction(ctx, appealId, action);
         });
 
         bot.command('list_of_prayer_requests', async ctx => {
@@ -348,6 +371,11 @@ export class BotHandler {
 
             if (userState === 'REPORTING') {
                 await this.handleReportReason(ctx, ctx.message.text);
+                return;
+            }
+
+            if (userState === 'APPEALING') {
+                await this.handleAppealMessage(ctx, ctx.message.text);
                 return;
             }
 
@@ -874,6 +902,174 @@ export class BotHandler {
         }
     }
 
+    private async handleAppealStart(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.userManager) return;
+
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!counselor || !counselor.isSuspended) {
+            await ctx.reply('Appeals are only available for suspended counselors.');
+            return;
+        }
+
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'APPEALING');
+        await this.replyWithMenu(ctx, 'APPEALING', 'Please enter your appeal message to the admins.');
+    }
+
+    private async handleAppealMessage(ctx: Context, text: string): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.userManager) return;
+
+        const message = text.trim();
+        if (!message) {
+            await this.replyWithMenu(ctx, 'APPEALING', 'Please enter your appeal message to the admins.');
+            return;
+        }
+
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!counselor || !counselor.isSuspended) {
+            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', 'Appeals are only available for suspended counselors.');
+            return;
+        }
+
+        const appeal = {
+            appealId: generateAppealId(),
+            counselorId: counselor.id,
+            message,
+            strikes: counselor.strikes ?? 0,
+            timestamp: new Date(),
+            processed: false
+        };
+
+        await this.collections.appeals.insertOne(appeal);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', `Appeal submitted. Reference: ${appeal.appealId}`);
+    }
+
+    private async handleAppeals(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.collections) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized appeals access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to view appeals.');
+            return;
+        }
+
+        const appeals = await this.collections.appeals
+            .find({ processed: false })
+            .sort({ timestamp: -1 })
+            .toArray();
+
+        if (appeals.length === 0) {
+            await ctx.reply('No pending appeals.');
+            return;
+        }
+
+        await ctx.reply(`Pending appeals (${appeals.length}):`);
+
+        const chunkSize = 10;
+        for (let i = 0; i < appeals.length; i += chunkSize) {
+            const slice = appeals.slice(i, i + chunkSize);
+            for (const appeal of slice) {
+                const submittedAt = appeal.timestamp instanceof Date
+                    ? appeal.timestamp.toISOString()
+                    : new Date(appeal.timestamp).toISOString();
+                const message = [
+                    '🧾 Appeal',
+                    `Appeal ID: ${appeal.appealId}`,
+                    `Counselor ID: ${appeal.counselorId}`,
+                    `Strikes: ${appeal.strikes}`,
+                    `Message: ${appeal.message}`,
+                    `Submitted: ${submittedAt}`
+                ].join('\n');
+
+                await ctx.reply(
+                    message,
+                    Markup.inlineKeyboard([
+                        Markup.button.callback(
+                            '♻️ Revoke Suspension',
+                            `${BotHandler.APPEAL_ACTION_PREFIX}:${appeal.appealId}:r`
+                        ),
+                        Markup.button.callback(
+                            '✅ Approve',
+                            `${BotHandler.APPEAL_ACTION_PREFIX}:${appeal.appealId}:a`
+                        )
+                    ])
+                );
+            }
+        }
+    }
+
+    private async processAppealAction(ctx: Context, appealId: string, action: 'revoke' | 'approve'): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.auditLogManager || !this.counselorManager) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized appeal action access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to process appeals.');
+            return;
+        }
+
+        const appeal = await this.collections.appeals.findOne({ appealId });
+        if (!appeal) {
+            await ctx.reply('Appeal not found.');
+            return;
+        }
+
+        if (appeal.processed) {
+            await ctx.reply('Appeal already processed.');
+            return;
+        }
+
+        const counselor = await this.collections.counselors.findOne({ id: appeal.counselorId });
+        if (!counselor) {
+            await ctx.reply('Counselor not found for this appeal.');
+            return;
+        }
+
+        if (action === 'approve') {
+            await this.counselorManager.approveCounselor(ctx.chat.id.toString(), counselor.id);
+            await this.auditLogManager.recordAdminAction(ctx.chat.id.toString(), 'appeal_approve', counselor.id);
+            await ctx.reply(`Appeal approved. Counselor ${counselor.id} is approved.`);
+        } else {
+            const result = await this.collections.counselors.updateOne(
+                { id: counselor.id },
+                { $set: { isSuspended: false, status: 'away', lastActive: new Date() } }
+            );
+
+            if (result.matchedCount === 0) {
+                await ctx.reply('Counselor not found.');
+                return;
+            }
+
+            await this.auditLogManager.recordAdminAction(ctx.chat.id.toString(), 'appeal_revoke_suspension', counselor.id);
+            await ctx.reply(`Appeal processed. Suspension revoked for counselor ${counselor.id}.`);
+        }
+
+        await this.collections.appeals.updateOne(
+            { appealId },
+            {
+                $set: {
+                    processed: true,
+                    processedAt: new Date(),
+                    processedBy: ctx.chat.id.toString(),
+                    action
+                }
+            }
+        );
+
+        if (counselor.telegramChatId && this.bot) {
+            const notification = action === 'approve'
+                ? 'Your appeal has been approved. Your counseling access has been restored.'
+                : 'Your appeal has been reviewed. Your suspension has been revoked.';
+            try {
+                await this.bot.telegram.sendMessage(counselor.telegramChatId, notification);
+            } catch (error) {
+                const err = error as Error;
+                logger.warn('Failed to notify counselor about appeal decision', {
+                    counselorId: counselor.id,
+                    message: err.message
+                });
+            }
+        }
+    }
+
     private async handleRevokeSuspension(ctx: Context, counselorId: string): Promise<void> {
         if (!ctx.chat || !this.collections || !this.auditLogManager) return;
         if (!this.isAdmin(ctx.chat.id)) {
@@ -1377,7 +1573,7 @@ export class BotHandler {
         return trimmed;
     }
 
-    private buildMenu(state: UserState, role: 'user' | 'counselor' | 'admin') {
+    private buildMenu(state: UserState, role: 'user' | 'counselor' | 'admin' | 'suspended') {
         const baseRows = state === 'IN_SESSION'
             ? this.getSessionMenuRows()
             : state === 'REPORTING' || state === 'POST_SESSION'
@@ -1392,7 +1588,7 @@ export class BotHandler {
         ]).resize().persistent();
     }
 
-    private getMainMenuRows(role: 'user' | 'counselor' | 'admin'): string[][] {
+    private getMainMenuRows(role: 'user' | 'counselor' | 'admin' | 'suspended'): string[][] {
         const rows: string[][] = [];
 
         if (role === 'user') {
@@ -1420,7 +1616,7 @@ export class BotHandler {
         ];
     }
 
-    private getRoleMenuRows(role: 'user' | 'counselor' | 'admin'): string[][] {
+    private getRoleMenuRows(role: 'user' | 'counselor' | 'admin' | 'suspended'): string[][] {
         const counselorRows = [
             [BotHandler.MENU_REGISTER_COUNSELOR],
             [BotHandler.MENU_STATUS_AVAILABLE, BotHandler.MENU_STATUS_AWAY],
@@ -1434,9 +1630,14 @@ export class BotHandler {
             [BotHandler.MENU_PENDING_REPORTS],
             [BotHandler.MENU_PROCESS_REPORT],
             [BotHandler.MENU_COUNSELOR_LIST],
+            [BotHandler.MENU_APPEALS],
             [BotHandler.MENU_APPROVE_COUNSELOR],
             [BotHandler.MENU_REMOVE_COUNSELOR],
             [BotHandler.MENU_AUDIT_LOG]
+        ];
+
+        const suspendedRows = [
+            [BotHandler.MENU_APPEAL]
         ];
 
         if (role === 'admin') {
@@ -1447,10 +1648,14 @@ export class BotHandler {
             return counselorRows;
         }
 
+        if (role === 'suspended') {
+            return suspendedRows;
+        }
+
         return [[BotHandler.MENU_REGISTER_COUNSELOR]];
     }
 
-    private async getMenuRole(chatId: number): Promise<'user' | 'counselor' | 'admin'> {
+    private async getMenuRole(chatId: number): Promise<'user' | 'counselor' | 'admin' | 'suspended'> {
         if (this.isAdmin(chatId)) {
             return 'admin';
         }
@@ -1460,8 +1665,14 @@ export class BotHandler {
         }
 
         const counselor = await this.collections.counselors.findOne({ telegramChatId: chatId });
-        if (counselor && counselor.isApproved && !counselor.isSuspended) {
-            return 'counselor';
+        if (counselor) {
+            if (counselor.isApproved && !counselor.isSuspended) {
+                return 'counselor';
+            }
+
+            if (counselor.isSuspended) {
+                return 'suspended';
+            }
         }
 
         return 'user';
@@ -1497,6 +1708,8 @@ export class BotHandler {
             || text === BotHandler.MENU_PENDING_REPORTS
             || text === BotHandler.MENU_PROCESS_REPORT
             || text === BotHandler.MENU_COUNSELOR_LIST
+            || text === BotHandler.MENU_APPEAL
+            || text === BotHandler.MENU_APPEALS
             || text === BotHandler.MENU_APPROVE_COUNSELOR
             || text === BotHandler.MENU_REMOVE_COUNSELOR
             || text === BotHandler.MENU_AUDIT_LOG;
