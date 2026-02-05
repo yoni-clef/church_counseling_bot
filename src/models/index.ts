@@ -1,11 +1,14 @@
 // Data Models for Telegram Counseling Bot
 // All interfaces follow the design document specifications
 
+export type UserState = 'IDLE' | 'SUBMITTING_PRAYER' | 'WAITING_COUNSELOR' | 'IN_SESSION' | 'VIEWING_HISTORY' | 'REPORTING' | 'POST_SESSION';
+
 export interface User {
     uuid: string;           // Anonymous identifier
     telegramChatId: number; // Telegram chat ID for messaging
     createdAt: Date;
     lastActive: Date;
+    state: UserState;        // Conversation state for menu routing
 }
 
 export interface Counselor {
