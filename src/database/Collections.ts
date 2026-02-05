@@ -6,6 +6,7 @@ import { Message } from '../types/Message';
 import { PrayerRequest } from '../types/PrayerRequest';
 import { Report } from '../types/Report';
 import { AuditLog } from '../types/AuditLog';
+import { Appeal } from '../types/Appeal';
 
 export class Collections {
     private db: Db;
@@ -18,6 +19,7 @@ export class Collections {
     public prayers: Collection<PrayerRequest>;
     public reports: Collection<Report>;
     public auditLogs: Collection<AuditLog>;
+    public appeals: Collection<Appeal>;
 
     constructor(db: Db) {
         this.db = db;
@@ -30,6 +32,7 @@ export class Collections {
         this.prayers = db.collection<PrayerRequest>('prayers');
         this.reports = db.collection<Report>('reports');
         this.auditLogs = db.collection<AuditLog>('audit_logs');
+        this.appeals = db.collection<Appeal>('appeals');
     }
 
     async initializeCollections(): Promise<void> {
@@ -80,6 +83,12 @@ export class Collections {
             await this.auditLogs.createIndex({ action: 1 });
             await this.auditLogs.createIndex({ timestamp: 1 });
 
+            // Create indexes for appeals collection
+            await this.appeals.createIndex({ appealId: 1 }, { unique: true });
+            await this.appeals.createIndex({ counselorId: 1 });
+            await this.appeals.createIndex({ processed: 1 });
+            await this.appeals.createIndex({ timestamp: 1 });
+
             console.log('Successfully initialized all collections and indexes');
         } catch (error) {
             console.error('Error initializing collections:', error);
@@ -95,7 +104,8 @@ export class Collections {
             'messages',
             'prayers',
             'reports',
-            'audit_logs'
+            'audit_logs',
+            'appeals'
         ];
 
         const existingCollections = await this.db.listCollections().toArray();
@@ -119,7 +129,8 @@ export class Collections {
             { name: 'messages', collection: this.messages },
             { name: 'prayers', collection: this.prayers },
             { name: 'reports', collection: this.reports },
-            { name: 'audit_logs', collection: this.auditLogs }
+            { name: 'audit_logs', collection: this.auditLogs },
+            { name: 'appeals', collection: this.appeals }
         ];
 
         for (const { name, collection } of collections) {
