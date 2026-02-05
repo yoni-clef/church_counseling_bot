@@ -43,4 +43,25 @@ export class AuditLogManager {
             .limit(limit)
             .toArray();
     }
+
+    /**
+     * Get paged audit logs
+     */
+    async getAdminActionsPage(page: number, pageSize: number): Promise<{ logs: AuditLog[]; total: number }> {
+        const safePage = Math.max(1, page);
+        const safePageSize = Math.max(1, pageSize);
+        const skip = (safePage - 1) * safePageSize;
+
+        const [total, logs] = await Promise.all([
+            this.collections.auditLogs.countDocuments({}),
+            this.collections.auditLogs
+                .find({})
+                .sort({ timestamp: -1 })
+                .skip(skip)
+                .limit(safePageSize)
+                .toArray()
+        ]);
+
+        return { logs, total };
+    }
 }
