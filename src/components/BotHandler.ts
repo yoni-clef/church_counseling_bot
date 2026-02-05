@@ -1,9 +1,10 @@
-import { Telegraf, Context } from 'telegraf';
+import { Telegraf, Context, Markup } from 'telegraf';
 import { AppConfig } from '../config/Config';
 import { DatabaseManager } from '../database';
 import { Collections } from '../database/Collections';
 import { UserManager, CounselorManager, SessionManager, ReportingSystem, StatisticsManager, CleanupManager, AuditLogManager } from '../managers';
 import { Session } from '../types/Session';
+import { UserState } from '../types/User';
 import { logger } from '../utils/logger';
 
 // Bot Handler Component - Central message routing and command processing
@@ -19,9 +20,16 @@ export class BotHandler {
     private statisticsManager: StatisticsManager | null = null;
     private cleanupManager: CleanupManager | null = null;
     private auditLogManager: AuditLogManager | null = null;
-    private pendingConsentUserIds: Set<string> = new Set();
-    private pendingPrayerChatIds: Set<number> = new Set();
     private cleanupInterval: NodeJS.Timeout | null = null;
+
+    private static readonly MENU_START_COUNSELING = '💬 Start Counseling';
+    private static readonly MENU_SUBMIT_PRAYER = '🙏 Submit Prayer Request';
+    private static readonly MENU_HISTORY = '📜 My History';
+    private static readonly MENU_HELP = 'ℹ️ Help';
+    private static readonly MENU_END_SESSION = '🛑 End Session';
+    private static readonly MENU_REPORT = '⚠️ Report';
+    private static readonly MENU_MAIN = '🏠 Main Menu';
+    private static readonly CONSENT_ACTION_PREFIX = 'consent';
 
     constructor(config: AppConfig) {
         this.config = config;
@@ -91,143 +99,54 @@ export class BotHandler {
             if (!ctx.chat) return;
 
             const userId = await this.userManager!.registerUser(ctx.chat.id);
-            await ctx.reply(
-                `Welcome! Your anonymous ID is ${userId}. Use /start_session to request a counselor or /request_prayer <title> for prayer support. Type /help for a list of commands.`
-            );
+            await this.userManager!.updateUserState(userId, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', `Welcome! Your anonymous ID is ${userId}. Use the buttons below to get started.`);
         });
 
         bot.command('help', async ctx => {
-            if (!ctx.chat || !this.collections) return;
-
-            const isAdmin = this.isAdmin(ctx.chat.id);
-            const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
-            const isCounselor = !!counselor && counselor.isApproved && !counselor.isSuspended;
-
-            const userCommands = [
-                '/start_session - Request a counseling session',
-                '/consent - Accept consent and begin session',
-                '/end_session - End your active session',
-                '/request_prayer <title> - Submit a prayer request',
-                '/history [limit] - View recent session messages',
-                '/report <reason> - Report a counselor after a session'
-            ];
-
-            const counselorCommands = [
-                '/register_counselor - Register as counselor (requires admin approval)',
-                '/available | /busy | /away - Set counselor availability',
-                '/my_stats - View counselor statistics',
-                '/list_of_prayer_requests - View prayer requests',
-                '/close_prayer <prayerId> - Close a prayer request'
-            ];
-
-            const adminCommands = [
-                '/admin_stats - View system statistics (admins)',
-                '/pending_reports - List pending reports (admins)',
-                '/process_report <reportId> <strike|dismiss> - Process report (admins)',
-                '/approve_counselor <counselorId> - Approve counselor (admins)',
-                '/remove_counselor <counselorId> - Remove counselor (admins)',
-                '/audit_log [limit] - View admin audit log (admins)'
-            ];
-
-            const commands = isAdmin
-                ? [...userCommands, ...counselorCommands, ...adminCommands]
-                : isCounselor
-                    ? [...userCommands, ...counselorCommands]
-                    : userCommands;
-
-            await ctx.reply(['Commands:', ...commands].join('\n'));
+            if (!ctx.chat) return;
+            await this.sendHelp(ctx);
         });
 
-        bot.command('start_session', async ctx => {
+        bot.hears(BotHandler.MENU_START_COUNSELING, async ctx => {
             if (!ctx.chat) return;
-
-            const userId = await this.userManager!.registerUser(ctx.chat.id);
-            this.pendingConsentUserIds.add(userId);
-            await ctx.reply(this.sessionManager!.getConsentDisclosureText());
-            await ctx.reply('Reply with /consent to begin your session.');
+            await this.startCounselingFlow(ctx);
         });
 
-        bot.command('consent', async ctx => {
+        bot.hears(BotHandler.MENU_SUBMIT_PRAYER, async ctx => {
             if (!ctx.chat) return;
-
-            const user = await this.userManager!.getUserByTelegramId(ctx.chat.id);
-            if (!user) {
-                await ctx.reply('Please use /start first.');
-                return;
-            }
-
-            if (!this.pendingConsentUserIds.has(user.uuid)) {
-                await ctx.reply('No pending consent request. Use /start_session first.');
-                return;
-            }
-
-            const counselorId = await this.counselorManager!.getAvailableCounselor();
-            if (!counselorId) {
-                await ctx.reply('No counselors are available right now. Please try again later.');
-                return;
-            }
-
-            const session = await this.sessionManager!.createSession(user.uuid, counselorId, true);
-            this.pendingConsentUserIds.delete(user.uuid);
-
-            const counselor = await this.collections!.counselors.findOne({ id: counselorId });
-            if (counselor) {
-                await this.bot!.telegram.sendMessage(
-                    counselor.telegramChatId,
-                    `New session started. User ID: ${session.userId}. Use normal chat to reply.`
-                );
-            }
-
-            await ctx.reply(`Session started. Your counselor has been notified. Session ID: ${session.sessionId}`);
+            await this.startPrayerSubmission(ctx);
         });
 
-        bot.command('end_session', async ctx => {
+        bot.hears(BotHandler.MENU_HISTORY, async ctx => {
             if (!ctx.chat) return;
-
-            const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
-            const session = requesterType === 'user'
-                ? await this.sessionManager!.getActiveSessionForUser(requesterId)
-                : await this.sessionManager!.getActiveSessionForCounselor(requesterId);
-
-            if (!session) {
-                await ctx.reply('No active session to end.');
-                return;
-            }
-
-            await this.sessionManager!.endSession(session.sessionId);
-
-            if (requesterType === 'user') {
-                await ctx.reply('Session ended. Thank you. If the conversation was inappropriate, report the counselor now with /report <reason>.');
-                const counselorChatId = await this.resolveChatId(session.counselorId, 'counselor');
-                if (counselorChatId) {
-                    await this.bot!.telegram.sendMessage(counselorChatId, 'Session has ended.');
-                }
-            } else {
-                await ctx.reply('Session ended.');
-                const userChatId = await this.resolveChatId(session.userId, 'user');
-                if (userChatId) {
-                    await this.bot!.telegram.sendMessage(
-                        userChatId,
-                        'Your session has ended. Thank you. If the conversation was inappropriate, report the counselor now with /report <reason>.'
-                    );
-                }
-            }
+            await this.sendHistory(ctx);
         });
 
-        bot.command('request_prayer', async ctx => {
+        bot.hears(BotHandler.MENU_HELP, async ctx => {
             if (!ctx.chat) return;
+            await this.sendHelp(ctx);
+        });
 
-            const title = this.extractCommandText(ctx.message?.text, 'request_prayer');
-            if (!title) {
-                this.pendingPrayerChatIds.add(ctx.chat.id);
-                await ctx.reply('Please enter your prayer title/topic.');
-                return;
-            }
+        bot.hears(BotHandler.MENU_END_SESSION, async ctx => {
+            if (!ctx.chat) return;
+            await this.endSession(ctx);
+        });
 
-            const userId = await this.userManager!.registerUser(ctx.chat.id);
-            await this.userManager!.submitPrayerRequest(userId, title);
-            this.pendingPrayerChatIds.delete(ctx.chat.id);
-            await ctx.reply('Your prayer request has been received. Counselors will pray for it.');
+        bot.hears(BotHandler.MENU_REPORT, async ctx => {
+            if (!ctx.chat) return;
+            await this.startReport(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_MAIN, async ctx => {
+            if (!ctx.chat) return;
+            await this.resetToMainMenu(ctx);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.CONSENT_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const userId = (ctx.match as RegExpMatchArray)[1];
+            await this.handleConsent(ctx, userId);
         });
 
         bot.command('list_of_prayer_requests', async ctx => {
@@ -288,63 +207,6 @@ export class BotHandler {
             } catch (error) {
                 await ctx.reply((error as Error).message || 'Unable to close prayer request.');
             }
-        });
-
-        bot.command('history', async ctx => {
-            if (!ctx.chat) return;
-
-            const limitArg = this.extractCommandText(ctx.message?.text, 'history');
-            const limit = limitArg ? Math.min(Math.max(parseInt(limitArg, 10) || 20, 1), 100) : 20;
-
-            const session = await this.findRecentSessionByChat(ctx.chat.id);
-            if (!session) {
-                await ctx.reply('No session history available.');
-                return;
-            }
-
-            const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
-            const messages = await this.sessionManager!.getMessageHistory(session.sessionId, requesterId, requesterType, limit);
-
-            if (messages.length === 0) {
-                await ctx.reply('No messages in session history.');
-                return;
-            }
-
-            const formatted = messages.map(msg => {
-                const senderLabel = msg.senderType === 'user' ? 'User' : 'Counselor';
-                return `[${msg.timestamp.toISOString()}] ${senderLabel}: ${msg.content}`;
-            });
-
-            await ctx.reply(formatted.join('\n'));
-        });
-
-        bot.command('report', async ctx => {
-            if (!ctx.chat) return;
-
-            const reason = this.extractCommandText(ctx.message?.text, 'report');
-            if (!reason) {
-                await ctx.reply('Please provide a reason for the report.');
-                return;
-            }
-
-            const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
-            if (requesterType !== 'user') {
-                await ctx.reply('Only users can submit reports.');
-                return;
-            }
-
-            let session = await this.sessionManager!.getActiveSessionForUser(requesterId);
-            if (!session) {
-                session = await this.findRecentSessionByChat(ctx.chat.id);
-            }
-
-            if (!session || session.userId !== requesterId) {
-                await ctx.reply('No recent session found to report.');
-                return;
-            }
-
-            const report = await this.reportingSystem!.submitReport(session.sessionId, session.counselorId, reason);
-            await ctx.reply(`Report submitted. Reference: ${report.reportId}`);
         });
 
         bot.command('register_counselor', async ctx => {
@@ -569,42 +431,363 @@ export class BotHandler {
                 return;
             }
 
-            if (this.pendingPrayerChatIds.has(ctx.chat.id)) {
-                const title = ctx.message.text.trim();
-                if (!title) {
-                    await ctx.reply('Please enter your prayer title/topic.');
+            if (this.isMenuText(ctx.message.text)) {
+                return;
+            }
+
+            const counselor = await this.collections!.counselors.findOne({ telegramChatId: ctx.chat.id });
+            const isCounselor = !!counselor && counselor.isApproved && !counselor.isSuspended;
+
+            if (isCounselor) {
+                const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+                const activeSession = requesterType === 'user'
+                    ? await this.sessionManager!.getActiveSessionForUser(requesterId)
+                    : await this.sessionManager!.getActiveSessionForCounselor(requesterId);
+
+                if (!activeSession) {
+                    await ctx.reply('No active session found.');
                     return;
                 }
 
-                const userId = await this.userManager!.registerUser(ctx.chat.id);
-                await this.userManager!.submitPrayerRequest(userId, title);
-                this.pendingPrayerChatIds.delete(ctx.chat.id);
-                await ctx.reply('Your prayer request has been received. Counselors will pray for it.');
+                const routed = await this.sessionManager!.routeMessage(
+                    activeSession.sessionId,
+                    requesterId,
+                    requesterType,
+                    ctx.message.text
+                );
+
+                const recipientChatId = await this.resolveChatId(routed.recipientId, routed.recipientType);
+                if (recipientChatId) {
+                    await this.bot!.telegram.sendMessage(recipientChatId, routed.message.content);
+                }
+
                 return;
             }
 
-            const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
-            const activeSession = requesterType === 'user'
-                ? await this.sessionManager!.getActiveSessionForUser(requesterId)
-                : await this.sessionManager!.getActiveSessionForCounselor(requesterId);
+            const userState = await this.userManager!.getUserStateByTelegramId(ctx.chat.id);
 
-            if (!activeSession) {
-                await ctx.reply('No active session found. Use /start_session to begin.');
+            if (userState === 'SUBMITTING_PRAYER') {
+                await this.handlePrayerTitle(ctx, ctx.message.text);
                 return;
             }
 
-            const routed = await this.sessionManager!.routeMessage(
-                activeSession.sessionId,
-                requesterId,
-                requesterType,
-                ctx.message.text
-            );
-
-            const recipientChatId = await this.resolveChatId(routed.recipientId, routed.recipientType);
-            if (recipientChatId) {
-                await this.bot!.telegram.sendMessage(recipientChatId, routed.message.content);
+            if (userState === 'REPORTING') {
+                await this.handleReportReason(ctx, ctx.message.text);
+                return;
             }
+
+            if (userState === 'IN_SESSION') {
+                const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+                const activeSession = await this.sessionManager!.getActiveSessionForUser(requesterId);
+
+                if (!activeSession) {
+                    await this.resetToMainMenu(ctx, 'No active session found.');
+                    return;
+                }
+
+                const routed = await this.sessionManager!.routeMessage(
+                    activeSession.sessionId,
+                    requesterId,
+                    requesterType,
+                    ctx.message.text
+                );
+
+                const recipientChatId = await this.resolveChatId(routed.recipientId, routed.recipientType);
+                if (recipientChatId) {
+                    await this.bot!.telegram.sendMessage(recipientChatId, routed.message.content);
+                }
+
+                return;
+            }
+
+            const userId = await this.userManager!.registerUser(ctx.chat.id);
+            const activeSession = await this.sessionManager!.getActiveSessionForUser(userId);
+            if (activeSession) {
+                await this.userManager!.updateUserState(userId, 'IN_SESSION');
+                const routed = await this.sessionManager!.routeMessage(
+                    activeSession.sessionId,
+                    userId,
+                    'user',
+                    ctx.message.text
+                );
+
+                const recipientChatId = await this.resolveChatId(routed.recipientId, routed.recipientType);
+                if (recipientChatId) {
+                    await this.bot!.telegram.sendMessage(recipientChatId, routed.message.content);
+                }
+
+                return;
+            }
+
+            await this.resetToMainMenu(ctx, 'Use the menu buttons below to continue.');
         });
+    }
+
+    private async startCounselingFlow(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager || !this.sessionManager) return;
+
+        const userId = await this.userManager.registerUser(ctx.chat.id);
+        const activeSession = await this.sessionManager.getActiveSessionForUser(userId);
+        if (activeSession) {
+            await this.userManager.updateUserState(userId, 'IN_SESSION');
+            await this.replyWithMenu(ctx, 'IN_SESSION', 'You already have an active session.');
+            return;
+        }
+
+        await this.userManager.updateUserState(userId, 'WAITING_COUNSELOR');
+        await ctx.reply(this.sessionManager.getConsentDisclosureText());
+        await ctx.reply(
+            'Tap the button below to provide consent and start your session.',
+            Markup.inlineKeyboard([
+                Markup.button.callback('✅ I Consent', `${BotHandler.CONSENT_ACTION_PREFIX}:${userId}`)
+            ])
+        );
+        await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'You can return to the main menu at any time.');
+    }
+
+    private async handleConsent(ctx: Context, userId: string): Promise<void> {
+        if (!ctx.chat || !this.userManager || !this.counselorManager || !this.sessionManager || !this.collections || !this.bot) return;
+
+        const user = await this.userManager.getUserByTelegramId(ctx.chat.id);
+        if (!user || user.uuid !== userId) {
+            await ctx.reply('Unable to confirm consent for this account.');
+            return;
+        }
+
+        if (user.state !== 'WAITING_COUNSELOR') {
+            await ctx.reply('No pending consent request. Use Start Counseling to begin.');
+            return;
+        }
+
+        const counselorId = await this.counselorManager.getAvailableCounselor();
+        if (!counselorId) {
+            await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'No counselors are available right now. Please try again later.');
+            return;
+        }
+
+        const session = await this.sessionManager.createSession(user.uuid, counselorId, true);
+        await this.userManager.updateUserState(user.uuid, 'IN_SESSION');
+
+        const counselor = await this.collections.counselors.findOne({ id: counselorId });
+        if (counselor) {
+            await this.bot.telegram.sendMessage(
+                counselor.telegramChatId,
+                `New session started. User ID: ${session.userId}. Use normal chat to reply.`
+            );
+        }
+
+        await this.replyWithMenu(ctx, 'IN_SESSION', `Session started. Your counselor has been notified. Session ID: ${session.sessionId}`);
+    }
+
+    private async endSession(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.sessionManager || !this.userManager) return;
+
+        const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+        const session = requesterType === 'user'
+            ? await this.sessionManager.getActiveSessionForUser(requesterId)
+            : await this.sessionManager.getActiveSessionForCounselor(requesterId);
+
+        if (!session) {
+            await this.replyWithMenu(ctx, 'IDLE', 'No active session to end.');
+            return;
+        }
+
+        await this.sessionManager.endSession(session.sessionId);
+
+        if (requesterType === 'user') {
+            await this.userManager.updateUserState(requesterId, 'POST_SESSION');
+            await this.replyWithMenu(ctx, 'POST_SESSION', 'Session ended. Thank you. You can report the counselor from the menu below if needed.');
+            const counselorChatId = await this.resolveChatId(session.counselorId, 'counselor');
+            if (counselorChatId) {
+                await this.bot!.telegram.sendMessage(counselorChatId, 'Session has ended. The user ended the session.');
+            }
+        } else {
+            await ctx.reply('Session ended.');
+            const userChatId = await this.resolveChatId(session.userId, 'user');
+            if (userChatId) {
+                await this.sendMenuToChatId(
+                    userChatId,
+                    'POST_SESSION',
+                    'Your session has ended. Thank you. You can report the counselor from the menu below if needed.'
+                );
+            }
+            await this.userManager.updateUserState(session.userId, 'POST_SESSION');
+        }
+    }
+
+    private async startPrayerSubmission(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'SUBMITTING_PRAYER');
+        await this.replyWithMenu(ctx, 'SUBMITTING_PRAYER', 'Please enter your prayer title/topic.');
+    }
+
+    private async handlePrayerTitle(ctx: Context, text: string): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        const title = text.trim();
+        if (!title) {
+            await this.replyWithMenu(ctx, 'SUBMITTING_PRAYER', 'Please enter your prayer title/topic.');
+            return;
+        }
+
+        const userId = await this.userManager.registerUser(ctx.chat.id);
+        await this.userManager.submitPrayerRequest(userId, title);
+        await this.userManager.updateUserState(userId, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', 'Your prayer request has been received. Counselors will pray for it.');
+    }
+
+    private async sendHistory(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.sessionManager || !this.userManager) return;
+
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'VIEWING_HISTORY');
+        const session = await this.findRecentSessionByChat(ctx.chat.id);
+        if (!session) {
+            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', 'No session history available.');
+            return;
+        }
+
+        const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+        const messages = await this.sessionManager.getMessageHistory(session.sessionId, requesterId, requesterType, 20);
+
+        if (messages.length === 0) {
+            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', 'No messages in session history.');
+            return;
+        }
+
+        const formatted = messages.map(msg => {
+            const senderLabel = msg.senderType === 'user' ? 'User' : 'Counselor';
+            return `[${msg.timestamp.toISOString()}] ${senderLabel}: ${msg.content}`;
+        });
+
+        await ctx.reply(formatted.join('\n'));
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', 'Here is your recent history.');
+    }
+
+    private async startReport(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager || !this.sessionManager) return;
+
+        const userId = await this.userManager.registerUser(ctx.chat.id);
+        const activeSession = await this.sessionManager.getActiveSessionForUser(userId);
+        if (activeSession) {
+            await this.userManager.updateUserState(userId, 'IN_SESSION');
+            await this.replyWithMenu(ctx, 'IN_SESSION', 'Please end your session before reporting.');
+            return;
+        }
+
+        const user = await this.userManager.getUserByTelegramId(ctx.chat.id);
+        if (user?.state !== 'POST_SESSION') {
+            await this.replyWithMenu(ctx, 'IDLE', 'Report is available after a session ends.');
+            return;
+        }
+
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'REPORTING');
+        await this.replyWithMenu(ctx, 'REPORTING', 'Please provide a reason for the report.');
+    }
+
+    private async handleReportReason(ctx: Context, text: string): Promise<void> {
+        if (!ctx.chat || !this.reportingSystem || !this.sessionManager || !this.userManager) return;
+
+        const reason = text.trim();
+        if (!reason) {
+            await this.replyWithMenu(ctx, 'REPORTING', 'Please provide a reason for the report.');
+            return;
+        }
+
+        const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+        if (requesterType !== 'user') {
+            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', 'Only users can submit reports.');
+            return;
+        }
+
+        let session = await this.sessionManager.getActiveSessionForUser(requesterId);
+        if (!session) {
+            session = await this.findRecentSessionByChat(ctx.chat.id);
+        }
+
+        if (!session || session.userId !== requesterId) {
+            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', 'No recent session found to report.');
+            return;
+        }
+
+        const report = await this.reportingSystem.submitReport(session.sessionId, session.counselorId, reason);
+        const counselorChatId = await this.resolveChatId(session.counselorId, 'counselor');
+        if (counselorChatId) {
+            await this.bot!.telegram.sendMessage(
+                counselorChatId,
+                [
+                    '⚠️ Report Submitted',
+                    'A user has submitted a report about your session.',
+                    `Report ID: ${report.reportId}`,
+                    `Reason: ${reason}`
+                ].join('\n')
+            );
+        }
+        const stillActive = await this.sessionManager.getActiveSessionForUser(requesterId);
+        const nextState: UserState = stillActive ? 'IN_SESSION' : 'IDLE';
+        await this.userManager.updateUserState(requesterId, nextState);
+        await this.replyWithMenu(ctx, nextState, `Report submitted. Reference: ${report.reportId}`);
+    }
+
+    private async resetToMainMenu(ctx: Context, message = 'Main menu:'): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+
+        const userId = await this.userManager.registerUser(ctx.chat.id);
+        const activeSession = this.sessionManager
+            ? await this.sessionManager.getActiveSessionForUser(userId)
+            : null;
+
+        if (activeSession) {
+            await this.userManager.updateUserState(userId, 'IN_SESSION');
+            await this.replyWithMenu(ctx, 'IN_SESSION', 'You have an active session. Use End Session to finish.');
+            return;
+        }
+
+        await this.userManager.updateUserState(userId, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', message);
+    }
+
+    private async sendHelp(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.collections) return;
+
+        const isAdmin = this.isAdmin(ctx.chat.id);
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        const isCounselor = !!counselor && counselor.isApproved && !counselor.isSuspended;
+
+        if (!isAdmin && !isCounselor) {
+            await this.replyWithMenu(
+                ctx,
+                'IDLE',
+                'Use the menu buttons to start counseling, submit a prayer request, view history, or get help.'
+            );
+            return;
+        }
+
+        const counselorCommands = [
+            '/register_counselor - Register as counselor (requires admin approval)',
+            '/available | /busy | /away - Set counselor availability',
+            '/my_stats - View counselor statistics',
+            '/list_of_prayer_requests - View prayer requests',
+            '/close_prayer <prayerId> - Close a prayer request'
+        ];
+
+        const adminCommands = [
+            '/admin_stats - View system statistics (admins)',
+            '/pending_reports - List pending reports (admins)',
+            '/process_report <reportId> <strike|dismiss> - Process report (admins)',
+            '/approve_counselor <counselorId> - Approve counselor (admins)',
+            '/remove_counselor <counselorId> - Remove counselor (admins)',
+            '/audit_log [limit] - View admin audit log (admins)'
+        ];
+
+        const commands = isAdmin
+            ? [...counselorCommands, ...adminCommands]
+            : counselorCommands;
+
+        await ctx.reply(['Commands:', ...commands].join('\n'));
     }
 
     private async updateCounselorStatus(ctx: Context, status: 'available' | 'busy' | 'away'): Promise<void> {
@@ -728,6 +911,112 @@ export class BotHandler {
         if (!text) return '';
         const trimmed = text.replace(`/${command}`, '').trim();
         return trimmed;
+    }
+
+    private buildMenu(state: UserState, role: 'user' | 'counselor' | 'admin') {
+        const baseRows = state === 'IN_SESSION'
+            ? this.getSessionMenuRows()
+            : state === 'REPORTING' || state === 'POST_SESSION'
+                ? this.getPostSessionMenuRows()
+                : this.getMainMenuRows();
+
+        const roleRows = this.getRoleMenuRows(role);
+
+        return Markup.keyboard([
+            ...baseRows,
+            ...roleRows
+        ]).resize().persistent();
+    }
+
+    private getMainMenuRows(): string[][] {
+        return [
+            [BotHandler.MENU_START_COUNSELING],
+            [BotHandler.MENU_SUBMIT_PRAYER],
+            [BotHandler.MENU_HISTORY, BotHandler.MENU_HELP],
+            [BotHandler.MENU_MAIN]
+        ];
+    }
+
+    private getSessionMenuRows(): string[][] {
+        return [
+            [BotHandler.MENU_END_SESSION],
+            [BotHandler.MENU_MAIN]
+        ];
+    }
+
+    private getPostSessionMenuRows(): string[][] {
+        return [
+            [BotHandler.MENU_REPORT],
+            [BotHandler.MENU_MAIN]
+        ];
+    }
+
+    private getRoleMenuRows(role: 'user' | 'counselor' | 'admin'): string[][] {
+        const counselorRows = [
+            ['/register_counselor'],
+            ['/available', '/busy', '/away'],
+            ['/my_stats'],
+            ['/list_of_prayer_requests'],
+            ['/close_prayer']
+        ];
+
+        const adminRows = [
+            ['/admin_stats'],
+            ['/pending_reports'],
+            ['/process_report'],
+            ['/approve_counselor'],
+            ['/remove_counselor'],
+            ['/audit_log']
+        ];
+
+        if (role === 'admin') {
+            return [...counselorRows, ...adminRows];
+        }
+
+        if (role === 'counselor') {
+            return counselorRows;
+        }
+
+        return [];
+    }
+
+    private async getMenuRole(chatId: number): Promise<'user' | 'counselor' | 'admin'> {
+        if (this.isAdmin(chatId)) {
+            return 'admin';
+        }
+
+        if (!this.collections) {
+            return 'user';
+        }
+
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: chatId });
+        if (counselor && counselor.isApproved && !counselor.isSuspended) {
+            return 'counselor';
+        }
+
+        return 'user';
+    }
+
+    private async replyWithMenu(ctx: Context, state: UserState, message: string): Promise<void> {
+        if (!ctx.chat) return;
+        const role = await this.getMenuRole(ctx.chat.id);
+        await ctx.reply(message, this.buildMenu(state, role));
+    }
+
+    private async sendMenuToChatId(chatId: number, state: UserState, message: string): Promise<void> {
+        if (!this.bot) return;
+        const role = await this.getMenuRole(chatId);
+        await this.bot.telegram.sendMessage(chatId, message, this.buildMenu(state, role));
+    }
+
+    private isMenuText(text: string): boolean {
+        return text === BotHandler.MENU_START_COUNSELING
+            || text === BotHandler.MENU_SUBMIT_PRAYER
+            || text === BotHandler.MENU_HISTORY
+            || text === BotHandler.MENU_HELP
+            || text === BotHandler.MENU_END_SESSION
+            || text === BotHandler.MENU_REPORT
+            || text === BotHandler.MENU_MAIN;
     }
 
     private isAdmin(chatId: number): boolean {
