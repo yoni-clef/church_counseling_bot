@@ -1,5 +1,5 @@
 // Validation schemas for data integrity
-import { User, Counselor, Session, Message, PrayerRequest, Report, CounselorStatus, SenderType } from './index';
+import { User, Counselor, Session, Message, PrayerRequest, Report, CounselorStatus, SenderType, UserState } from './index';
 
 // Validation functions for data integrity
 export class ValidationError extends Error {
@@ -21,6 +21,9 @@ export const validateUser = (user: Partial<User>): user is User => {
     }
     if (!user.lastActive || !(user.lastActive instanceof Date)) {
         throw new ValidationError('User must have a valid lastActive date');
+    }
+    if (!isValidUserState(user.state)) {
+        throw new ValidationError('User state must be a valid state');
     }
     return true;
 };
@@ -150,6 +153,16 @@ export const isValidSenderType = (senderType: any): senderType is SenderType => 
     return senderType === 'user' || senderType === 'counselor';
 };
 
+export const isValidUserState = (state: any): state is UserState => {
+    return state === 'IDLE'
+        || state === 'SUBMITTING_PRAYER'
+        || state === 'WAITING_COUNSELOR'
+        || state === 'IN_SESSION'
+        || state === 'VIEWING_HISTORY'
+    || state === 'REPORTING'
+    || state === 'POST_SESSION';
+};
+
 // Sanitization functions for data minimization (Requirements 10.4)
 export const sanitizeUserData = (user: User): User => {
     // Only keep essential fields, remove any potential PII
@@ -157,7 +170,8 @@ export const sanitizeUserData = (user: User): User => {
         uuid: user.uuid,
         telegramChatId: user.telegramChatId,
         createdAt: user.createdAt,
-        lastActive: user.lastActive
+        lastActive: user.lastActive,
+        state: user.state
     };
 };
 
