@@ -26,6 +26,10 @@ export const generateReportId = (): string => {
     return `report_${uuidv4()}`;
 };
 
+export const generateAppealId = (): string => {
+    return `appeal_${uuidv4()}`;
+};
+
 export const generateAuditLogId = (): string => {
     return `audit_${uuidv4()}`;
 };
@@ -62,7 +66,8 @@ export const COLLECTIONS = {
     MESSAGES: 'messages',
     PRAYER_REQUESTS: 'prayer_requests',
     REPORTS: 'reports',
-    AUDIT_LOGS: 'audit_logs'
+    AUDIT_LOGS: 'audit_logs',
+    APPEALS: 'appeals'
 } as const;
 
 export type CollectionName = typeof COLLECTIONS[keyof typeof COLLECTIONS];
