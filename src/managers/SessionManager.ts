@@ -69,11 +69,6 @@ export class SessionManager {
 
         await this.collections.sessions.insertOne(session);
 
-        await this.collections.counselors.updateOne(
-            { id: counselorId },
-            { $set: { status: 'busy', lastActive: now } }
-        );
-
         return session;
     }
 
