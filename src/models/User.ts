@@ -11,6 +11,8 @@ export interface User {
     createdAt: Date;
     /** Last activity timestamp */
     lastActive: Date;
+    /** Conversation state for menu routing */
+    state: 'IDLE' | 'SUBMITTING_PRAYER' | 'WAITING_COUNSELOR' | 'IN_SESSION' | 'VIEWING_HISTORY' | 'REPORTING' | 'POST_SESSION';
 }
 
 /**
@@ -30,7 +32,8 @@ export const validateUser = (user: any): user is User => {
         typeof user.telegramChatId === 'number' &&
         user.telegramChatId > 0 &&
         user.createdAt instanceof Date &&
-        user.lastActive instanceof Date
+        user.lastActive instanceof Date &&
+        ['IDLE', 'SUBMITTING_PRAYER', 'WAITING_COUNSELOR', 'IN_SESSION', 'VIEWING_HISTORY', 'REPORTING', 'POST_SESSION'].includes(user.state)
     );
 };
 
@@ -38,7 +41,7 @@ export const validateUser = (user: any): user is User => {
  * Validates that user data contains only allowed fields (data minimization)
  */
 export const validateUserDataMinimization = (userData: any): boolean => {
-    const allowedFields = ['uuid', 'telegramChatId', 'createdAt', 'lastActive'];
+    const allowedFields = ['uuid', 'telegramChatId', 'createdAt', 'lastActive', 'state'];
     const userFields = Object.keys(userData);
 
     // Check that all fields are allowed
