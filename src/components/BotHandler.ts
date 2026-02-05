@@ -29,6 +29,19 @@ export class BotHandler {
     private static readonly MENU_END_SESSION = '🛑 End Session';
     private static readonly MENU_REPORT = '⚠️ Report';
     private static readonly MENU_MAIN = '🏠 Main Menu';
+    private static readonly MENU_REGISTER_COUNSELOR = '🧑‍⚕️ Register as Counselor';
+    private static readonly MENU_STATUS_AVAILABLE = '✅ Set Available';
+    private static readonly MENU_STATUS_BUSY = '🟡 Set Busy';
+    private static readonly MENU_STATUS_AWAY = '⚪ Set Away';
+    private static readonly MENU_MY_STATS = '📊 My Stats';
+    private static readonly MENU_PRAYER_REQUESTS = '🙏 Prayer Requests';
+    private static readonly MENU_CLOSE_PRAYER = '✅ Close Prayer';
+    private static readonly MENU_ADMIN_STATS = '🛡️ Admin Stats';
+    private static readonly MENU_PENDING_REPORTS = '🚩 Pending Reports';
+    private static readonly MENU_PROCESS_REPORT = '⚙️ Process Report';
+    private static readonly MENU_APPROVE_COUNSELOR = '✅ Approve Counselor';
+    private static readonly MENU_REMOVE_COUNSELOR = '🗑️ Remove Counselor';
+    private static readonly MENU_AUDIT_LOG = '📜 Audit Log';
     private static readonly CONSENT_ACTION_PREFIX = 'consent';
 
     constructor(config: AppConfig) {
@@ -59,7 +72,7 @@ export class BotHandler {
             const err = error as Error;
             logger.error('Telegram bot error', { message: err.message, stack: err.stack });
             try {
-                await ctx.reply('Sorry, something went wrong. Please try again later.');
+                await ctx.reply(err.message || 'Sorry, something went wrong. Please try again later.');
             } catch {
                 // ignore reply errors
             }
@@ -143,6 +156,60 @@ export class BotHandler {
             await this.resetToMainMenu(ctx);
         });
 
+        bot.hears(BotHandler.MENU_REGISTER_COUNSELOR, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleRegisterCounselor(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_STATUS_AVAILABLE, async ctx => this.updateCounselorStatus(ctx, 'available'));
+        bot.hears(BotHandler.MENU_STATUS_BUSY, async ctx => this.updateCounselorStatus(ctx, 'busy'));
+        bot.hears(BotHandler.MENU_STATUS_AWAY, async ctx => this.updateCounselorStatus(ctx, 'away'));
+
+        bot.hears(BotHandler.MENU_MY_STATS, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleMyStats(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_PRAYER_REQUESTS, async ctx => {
+            if (!ctx.chat) return;
+            await this.sendPrayerRequestsToCounselor(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_CLOSE_PRAYER, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleClosePrayer(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_ADMIN_STATS, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleAdminStats(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_PENDING_REPORTS, async ctx => {
+            if (!ctx.chat) return;
+            await this.handlePendingReports(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_PROCESS_REPORT, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleProcessReport(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_APPROVE_COUNSELOR, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleApproveCounselor(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_REMOVE_COUNSELOR, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleRemoveCounselor(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_AUDIT_LOG, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleAuditLog(ctx);
+        });
+
         bot.action(new RegExp(`^${BotHandler.CONSENT_ACTION_PREFIX}:(.+)$`), async ctx => {
             if (!ctx.chat) return;
             const userId = (ctx.match as RegExpMatchArray)[1];
@@ -155,71 +222,13 @@ export class BotHandler {
         });
 
         bot.command('close_prayer', async ctx => {
-            if (!ctx.chat) return;
-            if (!this.collections || !this.userManager) return;
-
-            const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
-            if (!counselor || !counselor.isApproved || counselor.isSuspended) {
-                await ctx.reply('You are not approved to close prayer requests.');
-                return;
-            }
-
             const prayerId = this.extractCommandText(ctx.message?.text, 'close_prayer');
-            if (!prayerId) {
-                await ctx.reply('Select a prayer request to close:');
-                await this.sendPrayerRequestsToCounselor(ctx);
-                await ctx.reply('Use /close_prayer <prayerId> to close one.');
-                return;
-            }
-
-            try {
-                const result = await this.userManager.closePrayerRequest(prayerId);
-                if (!result.closed) {
-                    await ctx.reply('Prayer request already closed.');
-                    return;
-                }
-
-                await ctx.reply(`Prayer request ${prayerId} closed.`);
-
-                const userChatId = await this.resolveChatId(result.prayer.userId, 'user');
-                if (!userChatId) {
-                    logger.warn('Unable to notify prayer request submitter (missing chat ID)', { prayerId });
-                    return;
-                }
-
-                try {
-                    const submittedAt = result.prayer.createdAt.toISOString();
-                    const message = [
-                        '🙏 Prayer Update',
-                        'Your prayer request has been prayed for by a counselor.',
-                        `Title: ${result.prayer.title}`,
-                        `Submitted: ${submittedAt}`
-                    ].join('\n');
-
-                    await this.bot!.telegram.sendMessage(userChatId, message);
-                } catch (notifyError) {
-                    const err = notifyError as Error;
-                    logger.warn('Failed to notify prayer request submitter', {
-                        prayerId,
-                        message: err.message
-                    });
-                }
-            } catch (error) {
-                await ctx.reply((error as Error).message || 'Unable to close prayer request.');
-            }
+            await this.handleClosePrayer(ctx, prayerId);
         });
 
         bot.command('register_counselor', async ctx => {
             if (!ctx.chat) return;
-
-            const existing = await this.collections!.counselors.findOne({ telegramChatId: ctx.chat.id });
-            if (existing) {
-                await ctx.reply(`You are already registered. Counselor ID: ${existing.id}. Await admin approval.`);
-                return;
-            }
-
-            const counselorId = await this.counselorManager!.createCounselor(ctx.chat.id);
-            await ctx.reply(`Counselor registration created. Your counselor ID is ${counselorId}. Await admin approval.`);
+            await this.handleRegisterCounselor(ctx);
         });
 
         bot.command('available', async ctx => this.updateCounselorStatus(ctx, 'available'));
@@ -228,194 +237,41 @@ export class BotHandler {
 
         bot.command('my_stats', async ctx => {
             if (!ctx.chat) return;
-
-            const counselor = await this.collections!.counselors.findOne({ telegramChatId: ctx.chat.id });
-            if (!counselor || !counselor.isApproved || counselor.isSuspended) {
-                await ctx.reply('You are not approved to access counselor stats.');
-                return;
-            }
-
-            const stats = await this.statisticsManager!.getCounselorStats(counselor.id);
-            await ctx.reply(
-                `Sessions completed: ${stats.totalSessionsCompleted}\nActive sessions: ${stats.activeSessions}\nAverage duration: ${stats.averageSessionDuration} minutes\nPeak hours: ${stats.peakUsageHours.join(', ') || 'N/A'}`
-            );
+            await this.handleMyStats(ctx);
         });
 
         bot.command('admin_stats', async ctx => {
             if (!ctx.chat) return;
-            if (!this.isAdmin(ctx.chat.id)) {
-                logger.warn('Unauthorized admin_stats access', { chatId: ctx.chat.id });
-                await ctx.reply('You are not authorized to access admin stats.');
-                return;
-            }
-
-            const stats = await this.statisticsManager!.getAdminStats();
-            await ctx.reply(
-                `Total sessions completed: ${stats.totalSessionsCompleted}\nActive sessions: ${stats.activeSessions}\nAverage duration: ${stats.averageSessionDuration} minutes\nPrayer requests: ${stats.totalPrayerRequests}\nPeak hours: ${stats.peakUsageHours.join(', ') || 'N/A'}`
-            );
+            await this.handleAdminStats(ctx);
         });
 
         bot.command('pending_reports', async ctx => {
             if (!ctx.chat) return;
-            if (!this.isAdmin(ctx.chat.id)) {
-                logger.warn('Unauthorized pending_reports access', { chatId: ctx.chat.id });
-                await ctx.reply('You are not authorized to view reports.');
-                return;
-            }
-
-            const reports = await this.reportingSystem!.getPendingReports();
-            if (reports.length === 0) {
-                await ctx.reply('No pending reports.');
-                return;
-            }
-
-            const formatted = reports.map(report => `${report.reportId} | counselor ${report.counselorId} | ${report.reason}`);
-            await ctx.reply(formatted.join('\n'));
+            await this.handlePendingReports(ctx);
         });
 
         bot.command('process_report', async ctx => {
             if (!ctx.chat) return;
-            if (!this.isAdmin(ctx.chat.id)) {
-                logger.warn('Unauthorized process_report access', { chatId: ctx.chat.id });
-                await ctx.reply('You are not authorized to process reports.');
-                return;
-            }
-
             const args = this.extractCommandText(ctx.message?.text, 'process_report');
-            if (!args) {
-                await ctx.reply('Usage: /process_report <reportId> <strike|dismiss>');
-                return;
-            }
-
-            const [reportId, action] = args.split(' ');
-            if (!reportId || (action !== 'strike' && action !== 'dismiss')) {
-                await ctx.reply('Usage: /process_report <reportId> <strike|dismiss>');
-                return;
-            }
-
-            const report = await this.reportingSystem!.processReport(reportId, ctx.chat.id.toString(), action);
-            await this.auditLogManager!.recordAdminAction(
-                ctx.chat.id.toString(),
-                'process_report',
-                reportId,
-                { action, counselorId: report.counselorId }
-            );
-            await ctx.reply(`Report ${report.reportId} processed. Action: ${action}.`);
+            await this.handleProcessReport(ctx, args);
         });
 
         bot.command('approve_counselor', async ctx => {
             if (!ctx.chat) return;
-            if (!this.isAdmin(ctx.chat.id)) {
-                logger.warn('Unauthorized approve_counselor access', { chatId: ctx.chat.id });
-                await ctx.reply('You are not authorized to approve counselors.');
-                return;
-            }
-
             const counselorId = this.extractCommandText(ctx.message?.text, 'approve_counselor');
-            if (!counselorId) {
-                const pending = await this.collections!.counselors
-                    .find({ isApproved: false })
-                    .sort({ createdAt: -1 })
-                    .toArray();
-
-                if (pending.length === 0) {
-                    await ctx.reply('No counselors awaiting approval.');
-                    return;
-                }
-
-                const formatted = pending.map(counselor => {
-                    return `ID: ${counselor.id} | Status: ${counselor.status} | Strikes: ${counselor.strikes}`;
-                });
-
-                await ctx.reply('Pending counselor approvals (ID | Status | Strikes):');
-                const chunkSize = 25;
-                for (let i = 0; i < formatted.length; i += chunkSize) {
-                    await ctx.reply(formatted.slice(i, i + chunkSize).join('\n'));
-                }
-
-                await ctx.reply('Usage: /approve_counselor <counselorId>');
-                return;
-            }
-
-            await this.counselorManager!.approveCounselor(ctx.chat.id.toString(), counselorId);
-            await this.auditLogManager!.recordAdminAction(ctx.chat.id.toString(), 'approve_counselor', counselorId);
-            await ctx.reply(`Counselor ${counselorId} approved.`);
-
-            const counselor = await this.collections!.counselors.findOne({ id: counselorId });
-            if (counselor?.telegramChatId) {
-                try {
-                    await this.bot!.telegram.sendMessage(
-                        counselor.telegramChatId,
-                        'Your counseling request has been approved. You can now set your status and receive sessions.'
-                    );
-                } catch (error) {
-                    const err = error as Error;
-                    logger.warn('Failed to notify counselor approval', {
-                        counselorId,
-                        message: err.message
-                    });
-                }
-            }
+            await this.handleApproveCounselor(ctx, counselorId);
         });
 
         bot.command('remove_counselor', async ctx => {
             if (!ctx.chat) return;
-            if (!this.isAdmin(ctx.chat.id)) {
-                logger.warn('Unauthorized remove_counselor access', { chatId: ctx.chat.id });
-                await ctx.reply('You are not authorized to remove counselors.');
-                return;
-            }
-
             const counselorId = this.extractCommandText(ctx.message?.text, 'remove_counselor');
-            if (!counselorId) {
-                const counselors = await this.counselorManager!.listCounselors();
-                if (counselors.length === 0) {
-                    await ctx.reply('No counselors found.');
-                    return;
-                }
-
-                const formatted = counselors.map(counselor => {
-                    return `ID: ${counselor.counselorId} | Strikes: ${counselor.strikes} | Status: ${counselor.status}`;
-                });
-
-                await ctx.reply('Counselor list (ID | Strikes | Status):');
-                const chunkSize = 25;
-                for (let i = 0; i < formatted.length; i += chunkSize) {
-                    await ctx.reply(formatted.slice(i, i + chunkSize).join('\n'));
-                }
-
-                await ctx.reply('Usage: /remove_counselor <counselorId>');
-                return;
-            }
-
-            await this.counselorManager!.removeCounselor(ctx.chat.id.toString(), counselorId);
-            await this.auditLogManager!.recordAdminAction(ctx.chat.id.toString(), 'remove_counselor', counselorId);
-            await ctx.reply(`Counselor ${counselorId} removed.`);
+            await this.handleRemoveCounselor(ctx, counselorId);
         });
 
         bot.command('audit_log', async ctx => {
             if (!ctx.chat) return;
-            if (!this.isAdmin(ctx.chat.id)) {
-                logger.warn('Unauthorized audit_log access', { chatId: ctx.chat.id });
-                await ctx.reply('You are not authorized to view audit logs.');
-                return;
-            }
-
             const limitArg = this.extractCommandText(ctx.message?.text, 'audit_log');
-            const limit = limitArg ? Math.min(Math.max(parseInt(limitArg, 10) || 20, 1), 100) : 20;
-
-            const logs = await this.auditLogManager!.getRecentAdminActions(limit);
-            if (logs.length === 0) {
-                await ctx.reply('No audit log entries found.');
-                return;
-            }
-
-            const formatted = logs.map(log => {
-                const target = log.targetId ? ` | target ${log.targetId}` : '';
-                return `${log.timestamp.toISOString()} | ${log.action}${target} | admin ${log.adminId}`;
-            });
-
-            await ctx.reply(formatted.join('\n'));
+            await this.handleAuditLog(ctx, limitArg);
         });
     }
 
@@ -432,6 +288,18 @@ export class BotHandler {
             }
 
             if (this.isMenuText(ctx.message.text)) {
+                return;
+            }
+
+            const userState = await this.userManager!.getUserStateByTelegramId(ctx.chat.id);
+
+            if (userState === 'SUBMITTING_PRAYER') {
+                await this.handlePrayerTitle(ctx, ctx.message.text);
+                return;
+            }
+
+            if (userState === 'REPORTING') {
+                await this.handleReportReason(ctx, ctx.message.text);
                 return;
             }
 
@@ -461,18 +329,6 @@ export class BotHandler {
                     await this.bot!.telegram.sendMessage(recipientChatId, routed.message.content);
                 }
 
-                return;
-            }
-
-            const userState = await this.userManager!.getUserStateByTelegramId(ctx.chat.id);
-
-            if (userState === 'SUBMITTING_PRAYER') {
-                await this.handlePrayerTitle(ctx, ctx.message.text);
-                return;
-            }
-
-            if (userState === 'REPORTING') {
-                await this.handleReportReason(ctx, ctx.message.text);
                 return;
             }
 
@@ -548,35 +404,79 @@ export class BotHandler {
     private async handleConsent(ctx: Context, userId: string): Promise<void> {
         if (!ctx.chat || !this.userManager || !this.counselorManager || !this.sessionManager || !this.collections || !this.bot) return;
 
-        const user = await this.userManager.getUserByTelegramId(ctx.chat.id);
-        if (!user || user.uuid !== userId) {
-            await ctx.reply('Unable to confirm consent for this account.');
-            return;
-        }
+        try {
+            const user = await this.userManager.getUserByTelegramId(ctx.chat.id);
+            if (!user || user.uuid !== userId) {
+                await ctx.reply('Unable to confirm consent for this account.');
+                return;
+            }
 
-        if (user.state !== 'WAITING_COUNSELOR') {
-            await ctx.reply('No pending consent request. Use Start Counseling to begin.');
-            return;
-        }
+            if (user.state !== 'WAITING_COUNSELOR') {
+                await ctx.reply('No pending consent request. Use Start Counseling to begin.');
+                return;
+            }
 
-        const counselorId = await this.counselorManager.getAvailableCounselor();
-        if (!counselorId) {
-            await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'No counselors are available right now. Please try again later.');
-            return;
-        }
+            const maxAttempts = 3;
+            let counselorId: string | null = null;
+            let counselor: { telegramChatId: number } | null = null;
 
-        const session = await this.sessionManager.createSession(user.uuid, counselorId, true);
-        await this.userManager.updateUserState(user.uuid, 'IN_SESSION');
+            for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+                const candidateId = await this.counselorManager.getAvailableCounselor();
+                if (!candidateId) {
+                    break;
+                }
 
-        const counselor = await this.collections.counselors.findOne({ id: counselorId });
-        if (counselor) {
+                const candidate = await this.collections.counselors.findOne({ id: candidateId });
+                if (!candidate || candidate.telegramChatId === ctx.chat.id) {
+                    continue;
+                }
+
+                const activeSession = await this.sessionManager.getActiveSessionForCounselor(candidateId);
+                if (activeSession) {
+                    await this.collections.counselors.updateOne(
+                        { id: candidateId },
+                        { $set: { status: 'busy', lastActive: new Date() } }
+                    );
+                    continue;
+                }
+
+                counselorId = candidateId;
+                counselor = candidate;
+                break;
+            }
+
+            if (!counselorId || !counselor) {
+                await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'No counselors are available right now. Please try again later.');
+                return;
+            }
+
+            let session: Session;
+            try {
+                session = await this.sessionManager.createSession(user.uuid, counselorId, true);
+            } catch (error) {
+                const err = error as Error;
+                if (err.message.includes('Counselor already has an active session')) {
+                    await this.collections.counselors.updateOne(
+                        { id: counselorId },
+                        { $set: { status: 'busy', lastActive: new Date() } }
+                    );
+                    await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'No counselors are available right now. Please try again later.');
+                    return;
+                }
+                throw error;
+            }
+            await this.userManager.updateUserState(user.uuid, 'IN_SESSION');
+
             await this.bot.telegram.sendMessage(
                 counselor.telegramChatId,
                 `New session started. User ID: ${session.userId}. Use normal chat to reply.`
             );
-        }
 
-        await this.replyWithMenu(ctx, 'IN_SESSION', `Session started. Your counselor has been notified. Session ID: ${session.sessionId}`);
+            await this.replyWithMenu(ctx, 'IN_SESSION', `Session started. Your counselor has been notified. Session ID: ${session.sessionId}`);
+        } catch (error) {
+            const err = error as Error;
+            await ctx.reply(err.message || 'Unable to start session right now. Please try again later.');
+        }
     }
 
     private async endSession(ctx: Context): Promise<void> {
@@ -732,6 +632,276 @@ export class BotHandler {
         await this.replyWithMenu(ctx, nextState, `Report submitted. Reference: ${report.reportId}`);
     }
 
+    private async handleRegisterCounselor(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.counselorManager) return;
+
+        const existing = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (existing) {
+            await ctx.reply(`You are already registered. Counselor ID: ${existing.id}. Await admin approval.`);
+            return;
+        }
+
+        const counselorId = await this.counselorManager.createCounselor(ctx.chat.id);
+        await ctx.reply(`Counselor registration created. Your counselor ID is ${counselorId}. Await admin approval.`);
+    }
+
+    private async handleMyStats(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.statisticsManager) return;
+
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!counselor || !counselor.isApproved || counselor.isSuspended) {
+            await ctx.reply('You are not approved to access counselor stats.');
+            return;
+        }
+
+        const stats = await this.statisticsManager.getCounselorStats(counselor.id);
+        await ctx.reply(
+            `Sessions completed: ${stats.totalSessionsCompleted}\nActive sessions: ${stats.activeSessions}\nAverage duration: ${stats.averageSessionDuration} minutes\nPeak hours: ${stats.peakUsageHours.join(', ') || 'N/A'}`
+        );
+    }
+
+    private async handleAdminStats(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.statisticsManager) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized admin_stats access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to access admin stats.');
+            return;
+        }
+
+        const stats = await this.statisticsManager.getAdminStats();
+        await ctx.reply(
+            `Total sessions completed: ${stats.totalSessionsCompleted}\nActive sessions: ${stats.activeSessions}\nAverage duration: ${stats.averageSessionDuration} minutes\nPrayer requests: ${stats.totalPrayerRequests}\nPeak hours: ${stats.peakUsageHours.join(', ') || 'N/A'}`
+        );
+    }
+
+    private async handlePendingReports(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.reportingSystem) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized pending_reports access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to view reports.');
+            return;
+        }
+
+        const reports = await this.reportingSystem.getPendingReports();
+        if (reports.length === 0) {
+            await ctx.reply('No pending reports.');
+            return;
+        }
+
+        const formatted = reports.map(report => {
+            const submittedAt = report.timestamp instanceof Date
+                ? report.timestamp.toISOString()
+                : new Date(report.timestamp).toISOString();
+            return [
+                '🚩 Pending Report',
+                `Report ID: ${report.reportId}`,
+                `Counselor ID: ${report.counselorId}`,
+                `Reason: ${report.reason}`,
+                `Submitted: ${submittedAt}`
+            ].join('\n');
+        });
+
+        await ctx.reply(`Pending reports (${reports.length}):`);
+        const chunkSize = 10;
+        for (let i = 0; i < formatted.length; i += chunkSize) {
+            await ctx.reply(formatted.slice(i, i + chunkSize).join('\n\n'));
+        }
+    }
+
+    private async handleProcessReport(ctx: Context, args?: string): Promise<void> {
+        if (!ctx.chat || !this.reportingSystem || !this.auditLogManager) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized process_report access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to process reports.');
+            return;
+        }
+
+        if (!args) {
+            await ctx.reply('Usage: /process_report <reportId> <strike|dismiss>');
+            return;
+        }
+
+        const [reportId, action] = args.split(' ');
+        if (!reportId || (action !== 'strike' && action !== 'dismiss')) {
+            await ctx.reply('Usage: /process_report <reportId> <strike|dismiss>');
+            return;
+        }
+
+        const report = await this.reportingSystem.processReport(reportId, ctx.chat.id.toString(), action);
+        await this.auditLogManager.recordAdminAction(
+            ctx.chat.id.toString(),
+            'process_report',
+            reportId,
+            { action, counselorId: report.counselorId }
+        );
+        await ctx.reply(`Report ${report.reportId} processed. Action: ${action}.`);
+    }
+
+    private async handleApproveCounselor(ctx: Context, counselorId?: string): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.counselorManager || !this.auditLogManager) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized approve_counselor access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to approve counselors.');
+            return;
+        }
+
+        if (!counselorId) {
+            const pending = await this.collections.counselors
+                .find({ isApproved: false })
+                .sort({ createdAt: -1 })
+                .toArray();
+
+            if (pending.length === 0) {
+                await ctx.reply('No counselors awaiting approval.');
+                return;
+            }
+
+            const formatted = pending.map(counselor => {
+                return `ID: ${counselor.id} | Status: ${counselor.status} | Strikes: ${counselor.strikes}`;
+            });
+
+            await ctx.reply('Pending counselor approvals (ID | Status | Strikes):');
+            const chunkSize = 25;
+            for (let i = 0; i < formatted.length; i += chunkSize) {
+                await ctx.reply(formatted.slice(i, i + chunkSize).join('\n'));
+            }
+
+            await ctx.reply('Usage: /approve_counselor <counselorId>');
+            return;
+        }
+
+        await this.counselorManager.approveCounselor(ctx.chat.id.toString(), counselorId);
+        await this.auditLogManager.recordAdminAction(ctx.chat.id.toString(), 'approve_counselor', counselorId);
+        await ctx.reply(`Counselor ${counselorId} approved.`);
+
+        const counselor = await this.collections.counselors.findOne({ id: counselorId });
+        if (counselor?.telegramChatId) {
+            try {
+                await this.bot!.telegram.sendMessage(
+                    counselor.telegramChatId,
+                    'Your counseling request has been approved. You can now set your status and receive sessions.'
+                );
+            } catch (error) {
+                const err = error as Error;
+                logger.warn('Failed to notify counselor approval', {
+                    counselorId,
+                    message: err.message
+                });
+            }
+        }
+    }
+
+    private async handleRemoveCounselor(ctx: Context, counselorId?: string): Promise<void> {
+        if (!ctx.chat || !this.counselorManager || !this.auditLogManager) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized remove_counselor access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to remove counselors.');
+            return;
+        }
+
+        if (!counselorId) {
+            const counselors = await this.counselorManager.listCounselors();
+            if (counselors.length === 0) {
+                await ctx.reply('No counselors found.');
+                return;
+            }
+
+            const formatted = counselors.map(counselor => {
+                return `ID: ${counselor.counselorId} | Strikes: ${counselor.strikes} | Status: ${counselor.status}`;
+            });
+
+            await ctx.reply('Counselor list (ID | Strikes | Status):');
+            const chunkSize = 25;
+            for (let i = 0; i < formatted.length; i += chunkSize) {
+                await ctx.reply(formatted.slice(i, i + chunkSize).join('\n'));
+            }
+
+            await ctx.reply('Usage: /remove_counselor <counselorId>');
+            return;
+        }
+
+        await this.counselorManager.removeCounselor(ctx.chat.id.toString(), counselorId);
+        await this.auditLogManager.recordAdminAction(ctx.chat.id.toString(), 'remove_counselor', counselorId);
+        await ctx.reply(`Counselor ${counselorId} removed.`);
+    }
+
+    private async handleAuditLog(ctx: Context, limitArg?: string): Promise<void> {
+        if (!ctx.chat || !this.auditLogManager) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized audit_log access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to view audit logs.');
+            return;
+        }
+
+        const limit = limitArg ? Math.min(Math.max(parseInt(limitArg, 10) || 20, 1), 100) : 20;
+
+        const logs = await this.auditLogManager.getRecentAdminActions(limit);
+        if (logs.length === 0) {
+            await ctx.reply('No audit log entries found.');
+            return;
+        }
+
+        const formatted = logs.map(log => {
+            const target = log.targetId ? ` | target ${log.targetId}` : '';
+            return `${log.timestamp.toISOString()} | ${log.action}${target} | admin ${log.adminId}`;
+        });
+
+        await ctx.reply(formatted.join('\n'));
+    }
+
+    private async handleClosePrayer(ctx: Context, prayerId?: string): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.userManager) return;
+
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!counselor || !counselor.isApproved || counselor.isSuspended) {
+            await ctx.reply('You are not approved to close prayer requests.');
+            return;
+        }
+
+        if (!prayerId) {
+            await ctx.reply('Select a prayer request to close:');
+            await this.sendPrayerRequestsToCounselor(ctx);
+            await ctx.reply('Use /close_prayer <prayerId> to close one.');
+            return;
+        }
+
+        try {
+            const result = await this.userManager.closePrayerRequest(prayerId);
+            if (!result.closed) {
+                await ctx.reply('Prayer request already closed.');
+                return;
+            }
+
+            await ctx.reply(`Prayer request ${prayerId} closed.`);
+
+            const userChatId = await this.resolveChatId(result.prayer.userId, 'user');
+            if (!userChatId) {
+                logger.warn('Unable to notify prayer request submitter (missing chat ID)', { prayerId });
+                return;
+            }
+
+            try {
+                const submittedAt = result.prayer.createdAt.toISOString();
+                const message = [
+                    '🙏 Prayer Update',
+                    'Your prayer request has been prayed for by a counselor.',
+                    `Title: ${result.prayer.title}`,
+                    `Submitted: ${submittedAt}`
+                ].join('\n');
+
+                await this.bot!.telegram.sendMessage(userChatId, message);
+            } catch (notifyError) {
+                const err = notifyError as Error;
+                logger.warn('Failed to notify prayer request submitter', {
+                    prayerId,
+                    message: err.message
+                });
+            }
+        } catch (error) {
+            await ctx.reply((error as Error).message || 'Unable to close prayer request.');
+        }
+    }
+
     private async resetToMainMenu(ctx: Context, message = 'Main menu:'): Promise<void> {
         if (!ctx.chat || !this.userManager) return;
 
@@ -828,8 +998,8 @@ export class BotHandler {
             const submittedAt = prayer.createdAt.toISOString();
             return [
                 '🙏 Prayer Request',
-                `ID: ${prayer.prayerId}`,
                 `Title: ${prayer.title}`,
+                `ID: ${prayer.prayerId}`,
                 `Submitted: ${submittedAt}`
             ].join('\n');
         });
@@ -953,20 +1123,20 @@ export class BotHandler {
 
     private getRoleMenuRows(role: 'user' | 'counselor' | 'admin'): string[][] {
         const counselorRows = [
-            ['/register_counselor'],
-            ['/available', '/busy', '/away'],
-            ['/my_stats'],
-            ['/list_of_prayer_requests'],
-            ['/close_prayer']
+            [BotHandler.MENU_REGISTER_COUNSELOR],
+            [BotHandler.MENU_STATUS_AVAILABLE, BotHandler.MENU_STATUS_BUSY, BotHandler.MENU_STATUS_AWAY],
+            [BotHandler.MENU_MY_STATS],
+            [BotHandler.MENU_PRAYER_REQUESTS],
+            [BotHandler.MENU_CLOSE_PRAYER]
         ];
 
         const adminRows = [
-            ['/admin_stats'],
-            ['/pending_reports'],
-            ['/process_report'],
-            ['/approve_counselor'],
-            ['/remove_counselor'],
-            ['/audit_log']
+            [BotHandler.MENU_ADMIN_STATS],
+            [BotHandler.MENU_PENDING_REPORTS],
+            [BotHandler.MENU_PROCESS_REPORT],
+            [BotHandler.MENU_APPROVE_COUNSELOR],
+            [BotHandler.MENU_REMOVE_COUNSELOR],
+            [BotHandler.MENU_AUDIT_LOG]
         ];
 
         if (role === 'admin') {
@@ -977,7 +1147,7 @@ export class BotHandler {
             return counselorRows;
         }
 
-        return [];
+        return [[BotHandler.MENU_REGISTER_COUNSELOR]];
     }
 
     private async getMenuRole(chatId: number): Promise<'user' | 'counselor' | 'admin'> {
@@ -1016,7 +1186,20 @@ export class BotHandler {
             || text === BotHandler.MENU_HELP
             || text === BotHandler.MENU_END_SESSION
             || text === BotHandler.MENU_REPORT
-            || text === BotHandler.MENU_MAIN;
+            || text === BotHandler.MENU_MAIN
+            || text === BotHandler.MENU_REGISTER_COUNSELOR
+            || text === BotHandler.MENU_STATUS_AVAILABLE
+            || text === BotHandler.MENU_STATUS_BUSY
+            || text === BotHandler.MENU_STATUS_AWAY
+            || text === BotHandler.MENU_MY_STATS
+            || text === BotHandler.MENU_PRAYER_REQUESTS
+            || text === BotHandler.MENU_CLOSE_PRAYER
+            || text === BotHandler.MENU_ADMIN_STATS
+            || text === BotHandler.MENU_PENDING_REPORTS
+            || text === BotHandler.MENU_PROCESS_REPORT
+            || text === BotHandler.MENU_APPROVE_COUNSELOR
+            || text === BotHandler.MENU_REMOVE_COUNSELOR
+            || text === BotHandler.MENU_AUDIT_LOG;
     }
 
     private isAdmin(chatId: number): boolean {
