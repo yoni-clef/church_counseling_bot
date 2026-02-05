@@ -8,7 +8,7 @@ export class ReportingSystem {
     private collections: Collections;
     private readonly suspendThreshold: number;
     private readonly revokeThreshold: number;
-
+    
     constructor(collections: Collections, suspendThreshold = 3, revokeThreshold = 5) {
         if (revokeThreshold < suspendThreshold) {
             throw new Error('Revoke threshold must be greater than or equal to suspend threshold.');
@@ -120,7 +120,10 @@ export class ReportingSystem {
             throw new Error('Counselor not found.');
         }
 
-        const newStrikes = counselor.strikes + 1;
+        const currentStrikes = typeof counselor.strikes === 'number' && !Number.isNaN(counselor.strikes)
+            ? counselor.strikes
+            : 0;
+        const newStrikes = currentStrikes + 1;
         const updates: Record<string, unknown> = {
             strikes: newStrikes,
             lastActive: new Date()
