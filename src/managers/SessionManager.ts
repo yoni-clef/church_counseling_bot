@@ -244,4 +244,43 @@ export class SessionManager {
             .limit(limit)
             .toArray();
     }
+
+    /**
+     * Retrieve message history for a session with pagination
+     */
+    async getMessageHistoryPage(
+        sessionId: string,
+        requesterId: string,
+        requesterType: SenderType,
+        page: number,
+        pageSize: number
+    ): Promise<{ messages: Message[]; total: number }> {
+        const session = await this.collections.sessions.findOne({ sessionId });
+        if (!session) {
+            throw new Error('Session not found.');
+        }
+
+        const isAuthorizedUser = requesterType === 'user' && requesterId === session.userId;
+        const isAuthorizedCounselor = requesterType === 'counselor' && requesterId === session.counselorId;
+
+        if (!isAuthorizedUser && !isAuthorizedCounselor) {
+            throw new Error('Requester is not authorized to view this session history.');
+        }
+
+        const safePage = Math.max(1, page);
+        const safePageSize = Math.max(1, pageSize);
+        const skip = (safePage - 1) * safePageSize;
+
+        const [total, messages] = await Promise.all([
+            this.collections.messages.countDocuments({ sessionId }),
+            this.collections.messages
+                .find({ sessionId })
+                .sort({ timestamp: 1 })
+                .skip(skip)
+                .limit(safePageSize)
+                .toArray()
+        ]);
+
+        return { messages, total };
+    }
 }

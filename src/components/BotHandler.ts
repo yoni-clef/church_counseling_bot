@@ -53,6 +53,15 @@ export class BotHandler {
     private static readonly REVOKE_SUSPENSION_ACTION_PREFIX = 'rs';
     private static readonly REAPPROVE_ACTION_PREFIX = 'ap';
     private static readonly APPEAL_ACTION_PREFIX = 'al';
+    private static readonly PAGINATE_REPORTS_ACTION_PREFIX = 'pgr';
+    private static readonly PAGINATE_COUNSELORS_ACTION_PREFIX = 'pgc';
+    private static readonly PAGINATE_APPEALS_ACTION_PREFIX = 'pga';
+    private static readonly PAGINATE_APPROVALS_ACTION_PREFIX = 'pgap';
+    private static readonly PAGINATE_REMOVALS_ACTION_PREFIX = 'pgrm';
+    private static readonly PAGINATE_PRAYERS_ACTION_PREFIX = 'pgp';
+    private static readonly PAGINATE_HISTORY_ACTION_PREFIX = 'pgh';
+    private static readonly PAGINATE_AUDIT_ACTION_PREFIX = 'pgal';
+    private static readonly PAGE_SIZE = 10;
 
     constructor(config: AppConfig) {
         this.config = config;
@@ -286,6 +295,66 @@ export class BotHandler {
             const actionToken = match[2];
             const action = actionToken === 'r' ? 'revoke' : 'approve';
             await this.processAppealAction(ctx, appealId, action);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_REPORTS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.handlePendingReports(ctx, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_COUNSELORS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.handleCounselorList(ctx, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_APPEALS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.handleAppeals(ctx, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_APPROVALS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.handleApproveCounselor(ctx, undefined, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_REMOVALS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.handleRemoveCounselor(ctx, undefined, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_PRAYERS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.sendPrayerRequestsToCounselor(ctx, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_HISTORY_ACTION_PREFIX}:(\d+):(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const match = ctx.match as RegExpMatchArray;
+            const page = parseInt(match[1], 10);
+            const sessionId = match[2];
+            await ctx.answerCbQuery();
+            await this.sendHistory(ctx, page, sessionId);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_AUDIT_ACTION_PREFIX}:(\d+)(?::(\d+))?$`), async ctx => {
+            if (!ctx.chat) return;
+            const match = ctx.match as RegExpMatchArray;
+            const page = parseInt(match[1], 10);
+            const limitArg = match[2];
+            await ctx.answerCbQuery();
+            await this.handleAuditLog(ctx, limitArg, page);
         });
 
         bot.command('list_of_prayer_requests', async ctx => {
@@ -637,11 +706,13 @@ export class BotHandler {
         await this.replyWithMenu(ctx, 'IDLE', 'Your prayer request has been received. Counselors will pray for it.');
     }
 
-    private async sendHistory(ctx: Context): Promise<void> {
+    private async sendHistory(ctx: Context, page = 1, sessionId?: string): Promise<void> {
         if (!ctx.chat || !this.sessionManager || !this.userManager) return;
 
         await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'VIEWING_HISTORY');
-        const session = await this.findRecentSessionByChat(ctx.chat.id);
+        const session = sessionId
+            ? await this.collections?.sessions.findOne({ sessionId })
+            : await this.findRecentSessionByChat(ctx.chat.id);
         if (!session) {
             await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
             await this.replyWithMenu(ctx, 'IDLE', 'No session history available.');
@@ -649,20 +720,37 @@ export class BotHandler {
         }
 
         const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
-        const messages = await this.sessionManager.getMessageHistory(session.sessionId, requesterId, requesterType, 20);
+        const { messages, total } = await this.sessionManager.getMessageHistoryPage(
+            session.sessionId,
+            requesterId,
+            requesterType,
+            page,
+            BotHandler.PAGE_SIZE
+        );
 
-        if (messages.length === 0) {
+        if (total === 0) {
             await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
             await this.replyWithMenu(ctx, 'IDLE', 'No messages in session history.');
             return;
         }
+
+        const totalPages = Math.max(1, Math.ceil(total / BotHandler.PAGE_SIZE));
+        const safePage = Math.min(Math.max(page, 1), totalPages);
 
         const formatted = messages.map(msg => {
             const senderLabel = msg.senderType === 'user' ? 'User' : 'Counselor';
             return `[${msg.timestamp.toISOString()}] ${senderLabel}: ${msg.content}`;
         });
 
+        await ctx.reply(`Session history (${total}):`);
         await ctx.reply(formatted.join('\n'));
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_HISTORY_ACTION_PREFIX,
+            safePage,
+            totalPages,
+            session.sessionId
+        );
         await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
         await this.replyWithMenu(ctx, 'IDLE', 'Here is your recent history.');
     }
@@ -776,7 +864,7 @@ export class BotHandler {
         );
     }
 
-    private async handlePendingReports(ctx: Context): Promise<void> {
+    private async handlePendingReports(ctx: Context, page = 1): Promise<void> {
         if (!ctx.chat || !this.reportingSystem) return;
         if (!this.isAdmin(ctx.chat.id)) {
             logger.warn('Unauthorized pending_reports access', { chatId: ctx.chat.id });
@@ -790,37 +878,42 @@ export class BotHandler {
             return;
         }
 
-        await ctx.reply(`Pending reports (${reports.length}):`);
-        const chunkSize = 10;
-        for (let i = 0; i < reports.length; i += chunkSize) {
-            const slice = reports.slice(i, i + chunkSize);
-            for (const report of slice) {
-                const submittedAt = report.timestamp instanceof Date
-                    ? report.timestamp.toISOString()
-                    : new Date(report.timestamp).toISOString();
-                const message = [
-                    '🚩 Pending Report',
-                    `Report ID: ${report.reportId}`,
-                    `Counselor ID: ${report.counselorId}`,
-                    `Reason: ${report.reason}`,
-                    `Submitted: ${submittedAt}`
-                ].join('\n');
+        const { pageItems, safePage, totalPages } = this.getPagination(reports, page, BotHandler.PAGE_SIZE);
 
-                await ctx.reply(
-                    message,
-                    Markup.inlineKeyboard([
-                        Markup.button.callback(
-                            '⚠️ Strike',
-                            `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:s`
-                        ),
-                        Markup.button.callback(
-                            '✅ Dismiss',
-                            `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:d`
-                        )
-                    ])
-                );
-            }
+        await ctx.reply(`Pending reports (${reports.length}):`);
+        for (const report of pageItems) {
+            const submittedAt = report.timestamp instanceof Date
+                ? report.timestamp.toISOString()
+                : new Date(report.timestamp).toISOString();
+            const message = [
+                '🚩 Pending Report',
+                `Report ID: ${report.reportId}`,
+                `Counselor ID: ${report.counselorId}`,
+                `Reason: ${report.reason}`,
+                `Submitted: ${submittedAt}`
+            ].join('\n');
+
+            await ctx.reply(
+                message,
+                Markup.inlineKeyboard([
+                    Markup.button.callback(
+                        '⚠️ Strike',
+                        `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:s`
+                    ),
+                    Markup.button.callback(
+                        '✅ Dismiss',
+                        `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:d`
+                    )
+                ])
+            );
         }
+
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_REPORTS_ACTION_PREFIX,
+            safePage,
+            totalPages
+        );
     }
 
     private async handleProcessReport(ctx: Context, args?: string): Promise<void> {
@@ -845,7 +938,7 @@ export class BotHandler {
         await this.processReportAction(ctx, reportId, action);
     }
 
-    private async handleCounselorList(ctx: Context): Promise<void> {
+    private async handleCounselorList(ctx: Context, page = 1): Promise<void> {
         if (!ctx.chat || !this.counselorManager) return;
         if (!this.isAdmin(ctx.chat.id)) {
             logger.warn('Unauthorized counselor list access', { chatId: ctx.chat.id });
@@ -859,47 +952,52 @@ export class BotHandler {
             return;
         }
 
+        const { pageItems, safePage, totalPages } = this.getPagination(counselors, page, BotHandler.PAGE_SIZE);
+
         await ctx.reply(`Counselors (${counselors.length}):`);
 
-        const chunkSize = 10;
-        for (let i = 0; i < counselors.length; i += chunkSize) {
-            const slice = counselors.slice(i, i + chunkSize);
-            for (const counselor of slice) {
-                const message = [
-                    '🧑‍⚕️ Counselor',
-                    `ID: ${counselor.counselorId}`,
-                    `Status: ${counselor.status}`,
-                    `Approved: ${counselor.isApproved ? 'Yes' : 'No'}`,
-                    `Suspended: ${counselor.isSuspended ? 'Yes' : 'No'}`,
-                    `Strikes: ${counselor.strikes}`,
-                    `Sessions: ${counselor.sessionsHandled}`
-                ].join('\n');
+        for (const counselor of pageItems) {
+            const message = [
+                '🧑‍⚕️ Counselor',
+                `ID: ${counselor.counselorId}`,
+                `Status: ${counselor.status}`,
+                `Approved: ${counselor.isApproved ? 'Yes' : 'No'}`,
+                `Suspended: ${counselor.isSuspended ? 'Yes' : 'No'}`,
+                `Strikes: ${counselor.strikes}`,
+                `Sessions: ${counselor.sessionsHandled}`
+            ].join('\n');
 
-                const buttons = [] as ReturnType<typeof Markup.button.callback>[];
-                if (!counselor.isApproved) {
-                    buttons.push(
-                        Markup.button.callback(
-                            '✅ Approve',
-                            `${BotHandler.REAPPROVE_ACTION_PREFIX}:${counselor.counselorId}`
-                        )
-                    );
-                } else if (counselor.isSuspended) {
-                    buttons.push(
-                        Markup.button.callback(
-                            '♻️ Revoke Suspension',
-                            `${BotHandler.REVOKE_SUSPENSION_ACTION_PREFIX}:${counselor.counselorId}`
-                        )
-                    );
-                }
+            const buttons = [] as ReturnType<typeof Markup.button.callback>[];
+            if (!counselor.isApproved) {
+                buttons.push(
+                    Markup.button.callback(
+                        '✅ Approve',
+                        `${BotHandler.REAPPROVE_ACTION_PREFIX}:${counselor.counselorId}`
+                    )
+                );
+            } else if (counselor.isSuspended) {
+                buttons.push(
+                    Markup.button.callback(
+                        '♻️ Revoke Suspension',
+                        `${BotHandler.REVOKE_SUSPENSION_ACTION_PREFIX}:${counselor.counselorId}`
+                    )
+                );
+            }
 
-                const keyboard = buttons.length > 0 ? Markup.inlineKeyboard(buttons) : undefined;
-                if (keyboard) {
-                    await ctx.reply(message, keyboard);
-                } else {
-                    await ctx.reply(message);
-                }
+            const keyboard = buttons.length > 0 ? Markup.inlineKeyboard(buttons) : undefined;
+            if (keyboard) {
+                await ctx.reply(message, keyboard);
+            } else {
+                await ctx.reply(message);
             }
         }
+
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_COUNSELORS_ACTION_PREFIX,
+            safePage,
+            totalPages
+        );
     }
 
     private async handleAppealStart(ctx: Context): Promise<void> {
@@ -945,7 +1043,7 @@ export class BotHandler {
         await this.replyWithMenu(ctx, 'IDLE', `Appeal submitted. Reference: ${appeal.appealId}`);
     }
 
-    private async handleAppeals(ctx: Context): Promise<void> {
+    private async handleAppeals(ctx: Context, page = 1): Promise<void> {
         if (!ctx.chat || !this.collections) return;
         if (!this.isAdmin(ctx.chat.id)) {
             logger.warn('Unauthorized appeals access', { chatId: ctx.chat.id });
@@ -963,39 +1061,44 @@ export class BotHandler {
             return;
         }
 
+        const { pageItems, safePage, totalPages } = this.getPagination(appeals, page, BotHandler.PAGE_SIZE);
+
         await ctx.reply(`Pending appeals (${appeals.length}):`);
 
-        const chunkSize = 10;
-        for (let i = 0; i < appeals.length; i += chunkSize) {
-            const slice = appeals.slice(i, i + chunkSize);
-            for (const appeal of slice) {
-                const submittedAt = appeal.timestamp instanceof Date
-                    ? appeal.timestamp.toISOString()
-                    : new Date(appeal.timestamp).toISOString();
-                const message = [
-                    '🧾 Appeal',
-                    `Appeal ID: ${appeal.appealId}`,
-                    `Counselor ID: ${appeal.counselorId}`,
-                    `Strikes: ${appeal.strikes}`,
-                    `Message: ${appeal.message}`,
-                    `Submitted: ${submittedAt}`
-                ].join('\n');
+        for (const appeal of pageItems) {
+            const submittedAt = appeal.timestamp instanceof Date
+                ? appeal.timestamp.toISOString()
+                : new Date(appeal.timestamp).toISOString();
+            const message = [
+                '🧾 Appeal',
+                `Appeal ID: ${appeal.appealId}`,
+                `Counselor ID: ${appeal.counselorId}`,
+                `Strikes: ${appeal.strikes}`,
+                `Message: ${appeal.message}`,
+                `Submitted: ${submittedAt}`
+            ].join('\n');
 
-                await ctx.reply(
-                    message,
-                    Markup.inlineKeyboard([
-                        Markup.button.callback(
-                            '♻️ Revoke Suspension',
-                            `${BotHandler.APPEAL_ACTION_PREFIX}:${appeal.appealId}:r`
-                        ),
-                        Markup.button.callback(
-                            '✅ Approve',
-                            `${BotHandler.APPEAL_ACTION_PREFIX}:${appeal.appealId}:a`
-                        )
-                    ])
-                );
-            }
+            await ctx.reply(
+                message,
+                Markup.inlineKeyboard([
+                    Markup.button.callback(
+                        '♻️ Revoke Suspension',
+                        `${BotHandler.APPEAL_ACTION_PREFIX}:${appeal.appealId}:r`
+                    ),
+                    Markup.button.callback(
+                        '✅ Approve',
+                        `${BotHandler.APPEAL_ACTION_PREFIX}:${appeal.appealId}:a`
+                    )
+                ])
+            );
         }
+
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_APPEALS_ACTION_PREFIX,
+            safePage,
+            totalPages
+        );
     }
 
     private async processAppealAction(ctx: Context, appealId: string, action: 'revoke' | 'approve'): Promise<void> {
@@ -1173,7 +1276,7 @@ export class BotHandler {
         }
     }
 
-    private async handleApproveCounselor(ctx: Context, counselorId?: string): Promise<void> {
+    private async handleApproveCounselor(ctx: Context, counselorId?: string, page = 1): Promise<void> {
         if (!ctx.chat || !this.collections || !this.counselorManager || !this.auditLogManager) return;
         if (!this.isAdmin(ctx.chat.id)) {
             logger.warn('Unauthorized approve_counselor access', { chatId: ctx.chat.id });
@@ -1199,32 +1302,37 @@ export class BotHandler {
                 return;
             }
 
-            await ctx.reply(`Pending counselor approvals (${pending.length}):`);
-            const chunkSize = 10;
-            for (let i = 0; i < pending.length; i += chunkSize) {
-                const slice = pending.slice(i, i + chunkSize);
-                for (const counselor of slice) {
-                    const legacyCounselorId = 'counselorId' in counselor
-                        ? (counselor as { counselorId?: string }).counselorId
-                        : undefined;
-                    const counselorId = counselor.id ?? legacyCounselorId;
-                    if (!counselorId) {
-                        logger.warn('Pending counselor missing id', { counselor });
-                        continue;
-                    }
+            const { pageItems, safePage, totalPages } = this.getPagination(pending, page, BotHandler.PAGE_SIZE);
 
-                    const message = `ID: ${counselorId} | Status: ${counselor.status} | Strikes: ${counselor.strikes}`;
-                    await ctx.reply(
-                        message,
-                        Markup.inlineKeyboard([
-                            Markup.button.callback(
-                                '✅ Approve Counselor',
-                                `${BotHandler.APPROVE_COUNSELOR_ACTION_PREFIX}:${counselorId}`
-                            )
-                        ])
-                    );
+            await ctx.reply(`Pending counselor approvals (${pending.length}):`);
+            for (const counselor of pageItems) {
+                const legacyCounselorId = 'counselorId' in counselor
+                    ? (counselor as { counselorId?: string }).counselorId
+                    : undefined;
+                const counselorId = counselor.id ?? legacyCounselorId;
+                if (!counselorId) {
+                    logger.warn('Pending counselor missing id', { counselor });
+                    continue;
                 }
+
+                const message = `ID: ${counselorId} | Status: ${counselor.status} | Strikes: ${counselor.strikes}`;
+                await ctx.reply(
+                    message,
+                    Markup.inlineKeyboard([
+                        Markup.button.callback(
+                            '✅ Approve Counselor',
+                            `${BotHandler.APPROVE_COUNSELOR_ACTION_PREFIX}:${counselorId}`
+                        )
+                    ])
+                );
             }
+
+            await this.sendPaginationControls(
+                ctx,
+                BotHandler.PAGINATE_APPROVALS_ACTION_PREFIX,
+                safePage,
+                totalPages
+            );
             return;
         }
 
@@ -1249,7 +1357,7 @@ export class BotHandler {
         }
     }
 
-    private async handleRemoveCounselor(ctx: Context, counselorId?: string): Promise<void> {
+    private async handleRemoveCounselor(ctx: Context, counselorId?: string, page = 1): Promise<void> {
         if (!ctx.chat || !this.counselorManager || !this.auditLogManager) return;
         if (!this.isAdmin(ctx.chat.id)) {
             logger.warn('Unauthorized remove_counselor access', { chatId: ctx.chat.id });
@@ -1264,30 +1372,35 @@ export class BotHandler {
                 return;
             }
 
+            const { pageItems, safePage, totalPages } = this.getPagination(counselors, page, BotHandler.PAGE_SIZE);
+
             await ctx.reply(`Counselors (${counselors.length}):`);
 
-            const chunkSize = 10;
-            for (let i = 0; i < counselors.length; i += chunkSize) {
-                const slice = counselors.slice(i, i + chunkSize);
-                for (const counselor of slice) {
-                    const message = [
-                        '🧑‍⚕️ Counselor',
-                        `ID: ${counselor.counselorId}`,
-                        `Status: ${counselor.status}`,
-                        `Strikes: ${counselor.strikes}`
-                    ].join('\n');
+            for (const counselor of pageItems) {
+                const message = [
+                    '🧑‍⚕️ Counselor',
+                    `ID: ${counselor.counselorId}`,
+                    `Status: ${counselor.status}`,
+                    `Strikes: ${counselor.strikes}`
+                ].join('\n');
 
-                    await ctx.reply(
-                        message,
-                        Markup.inlineKeyboard([
-                            Markup.button.callback(
-                                '🗑️ Remove Counselor',
-                                `${BotHandler.REMOVE_COUNSELOR_ACTION_PREFIX}:${counselor.counselorId}`
-                            )
-                        ])
-                    );
-                }
+                await ctx.reply(
+                    message,
+                    Markup.inlineKeyboard([
+                        Markup.button.callback(
+                            '🗑️ Remove Counselor',
+                            `${BotHandler.REMOVE_COUNSELOR_ACTION_PREFIX}:${counselor.counselorId}`
+                        )
+                    ])
+                );
             }
+
+            await this.sendPaginationControls(
+                ctx,
+                BotHandler.PAGINATE_REMOVALS_ACTION_PREFIX,
+                safePage,
+                totalPages
+            );
 
             return;
         }
@@ -1297,7 +1410,7 @@ export class BotHandler {
         await ctx.reply(`Counselor ${counselorId} removed.`);
     }
 
-    private async handleAuditLog(ctx: Context, limitArg?: string): Promise<void> {
+    private async handleAuditLog(ctx: Context, limitArg?: string, page = 1): Promise<void> {
         if (!ctx.chat || !this.auditLogManager) return;
         if (!this.isAdmin(ctx.chat.id)) {
             logger.warn('Unauthorized audit_log access', { chatId: ctx.chat.id });
@@ -1305,20 +1418,53 @@ export class BotHandler {
             return;
         }
 
-        const limit = limitArg ? Math.min(Math.max(parseInt(limitArg, 10) || 20, 1), 100) : 20;
+        if (limitArg) {
+            const limit = Math.min(Math.max(parseInt(limitArg, 10) || 20, 1), 100);
+            const logs = await this.auditLogManager.getRecentAdminActions(limit);
+            if (logs.length === 0) {
+                await ctx.reply('No audit log entries found.');
+                return;
+            }
 
-        const logs = await this.auditLogManager.getRecentAdminActions(limit);
-        if (logs.length === 0) {
+            const { pageItems, safePage, totalPages } = this.getPagination(logs, page, BotHandler.PAGE_SIZE);
+            const formatted = pageItems.map(log => {
+                const target = log.targetId ? ` | target ${log.targetId}` : '';
+                return `${log.timestamp.toISOString()} | ${log.action}${target} | admin ${log.adminId}`;
+            });
+
+            await ctx.reply(`Audit log (${logs.length}):`);
+            await ctx.reply(formatted.join('\n'));
+            await this.sendPaginationControls(
+                ctx,
+                BotHandler.PAGINATE_AUDIT_ACTION_PREFIX,
+                safePage,
+                totalPages,
+                limitArg
+            );
+            return;
+        }
+
+        const { logs, total } = await this.auditLogManager.getAdminActionsPage(page, BotHandler.PAGE_SIZE);
+        if (total === 0) {
             await ctx.reply('No audit log entries found.');
             return;
         }
 
+        const totalPages = Math.max(1, Math.ceil(total / BotHandler.PAGE_SIZE));
+        const safePage = Math.min(Math.max(page, 1), totalPages);
         const formatted = logs.map(log => {
             const target = log.targetId ? ` | target ${log.targetId}` : '';
             return `${log.timestamp.toISOString()} | ${log.action}${target} | admin ${log.adminId}`;
         });
 
+        await ctx.reply(`Audit log (${total}):`);
         await ctx.reply(formatted.join('\n'));
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_AUDIT_ACTION_PREFIX,
+            safePage,
+            totalPages
+        );
     }
 
     private async handleClosePrayer(ctx: Context, prayerId?: string): Promise<void> {
@@ -1451,7 +1597,7 @@ export class BotHandler {
         await ctx.reply(`Status updated to ${status}.`);
     }
 
-    private async sendPrayerRequestsToCounselor(ctx: Context): Promise<void> {
+    private async sendPrayerRequestsToCounselor(ctx: Context, page = 1): Promise<void> {
         if (!ctx.chat || !this.collections || !this.userManager) return;
 
         const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
@@ -1466,27 +1612,86 @@ export class BotHandler {
             return;
         }
 
+        const { pageItems, safePage, totalPages } = this.getPagination(prayers, page, BotHandler.PAGE_SIZE);
+
         await ctx.reply(`Prayer requests (${prayers.length}):`);
 
-        const chunkSize = 10;
-        for (let i = 0; i < prayers.length; i += chunkSize) {
-            const slice = prayers.slice(i, i + chunkSize);
-            for (const prayer of slice) {
-                const submittedAt = prayer.createdAt.toISOString();
-                const message = [
-                    '🙏 Prayer Request',
-                    `Title: ${prayer.title}`,
-                    `ID: ${prayer.prayerId}`,
-                    `Submitted: ${submittedAt}`
-                ].join('\n');
+        for (const prayer of pageItems) {
+            const submittedAt = prayer.createdAt.toISOString();
+            const message = [
+                '🙏 Prayer Request',
+                `Title: ${prayer.title}`,
+                `ID: ${prayer.prayerId}`,
+                `Submitted: ${submittedAt}`
+            ].join('\n');
 
-                await ctx.reply(
-                    message,
-                    Markup.inlineKeyboard([
-                        Markup.button.callback('✅ Close Prayer', `${BotHandler.CLOSE_PRAYER_ACTION_PREFIX}:${prayer.prayerId}`)
-                    ])
-                );
-            }
+            await ctx.reply(
+                message,
+                Markup.inlineKeyboard([
+                    Markup.button.callback('✅ Close Prayer', `${BotHandler.CLOSE_PRAYER_ACTION_PREFIX}:${prayer.prayerId}`)
+                ])
+            );
+        }
+
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_PRAYERS_ACTION_PREFIX,
+            safePage,
+            totalPages
+        );
+    }
+
+    private getPagination<T>(items: T[], page: number, pageSize: number): {
+        pageItems: T[];
+        safePage: number;
+        totalPages: number;
+    } {
+        const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+        const safePage = Math.min(Math.max(page, 1), totalPages);
+        const start = (safePage - 1) * pageSize;
+        return {
+            pageItems: items.slice(start, start + pageSize),
+            safePage,
+            totalPages
+        };
+    }
+
+    private buildPageCallback(prefix: string, page: number, token?: string): string {
+        return token ? `${prefix}:${page}:${token}` : `${prefix}:${page}`;
+    }
+
+    private async sendPaginationControls(
+        ctx: Context,
+        prefix: string,
+        page: number,
+        totalPages: number,
+        token?: string
+    ): Promise<void> {
+        if (totalPages <= 1) {
+            return;
+        }
+
+        const buttons = [] as ReturnType<typeof Markup.button.callback>[];
+        if (page > 1) {
+            buttons.push(
+                Markup.button.callback(
+                    '⬅️ Previous',
+                    this.buildPageCallback(prefix, page - 1, token)
+                )
+            );
+        }
+
+        if (page < totalPages) {
+            buttons.push(
+                Markup.button.callback(
+                    'Next ➡️',
+                    this.buildPageCallback(prefix, page + 1, token)
+                )
+            );
+        }
+
+        if (buttons.length > 0) {
+            await ctx.reply(`Page ${page}/${totalPages}`, Markup.inlineKeyboard(buttons));
         }
     }
 
