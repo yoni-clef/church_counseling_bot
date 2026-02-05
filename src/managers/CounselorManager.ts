@@ -93,10 +93,12 @@ export class CounselorManager {
      */
     async approveCounselor(adminId: string, counselorId: string): Promise<void> {
         const result = await this.collections.counselors.updateOne(
-            { id: counselorId },
+            { $or: [{ id: counselorId }, { counselorId }] },
             {
                 $set: {
                     isApproved: true,
+                    is_approved: true,
+                    isSuspended: false,
                     lastActive: new Date()
                 }
             }
@@ -283,11 +285,12 @@ export class CounselorManager {
      */
     async createCounselor(telegramChatId: number): Promise<string> {
         const counselorId = uuidv4();
-        const counselor: Counselor = {
+        const counselor: Counselor & { is_approved: boolean } = {
             id: counselorId,
             telegramChatId,
             status: 'away',
             isApproved: false,
+            is_approved: false,
             strikes: 0,
             isSuspended: false,
             sessionsHandled: 0,
