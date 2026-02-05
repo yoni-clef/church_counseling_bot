@@ -6,3 +6,4 @@ export * from './Message';
 export * from './PrayerRequest';
 export * from './Report';
 export * from './AuditLog';
+export * from './Appeal';
