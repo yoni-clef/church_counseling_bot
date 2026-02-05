@@ -4,6 +4,7 @@ import { DatabaseManager } from '../database';
 import { Collections } from '../database/Collections';
 import { UserManager, CounselorManager, SessionManager, ReportingSystem, StatisticsManager, CleanupManager, AuditLogManager } from '../managers';
 import { Session } from '../types/Session';
+import { AuditLog } from '../types/AuditLog';
 import { UserState } from '../types/User';
 import { generateAppealId } from '../models/utils';
 import { logger } from '../utils/logger';
@@ -297,49 +298,49 @@ export class BotHandler {
             await this.processAppealAction(ctx, appealId, action);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_REPORTS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_REPORTS_ACTION_PREFIX}:(\\d+)$`), async ctx => {
             if (!ctx.chat) return;
             const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
             await ctx.answerCbQuery();
             await this.handlePendingReports(ctx, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_COUNSELORS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_COUNSELORS_ACTION_PREFIX}:(\\d+)$`), async ctx => {
             if (!ctx.chat) return;
             const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
             await ctx.answerCbQuery();
             await this.handleCounselorList(ctx, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_APPEALS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_APPEALS_ACTION_PREFIX}:(\\d+)$`), async ctx => {
             if (!ctx.chat) return;
             const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
             await ctx.answerCbQuery();
             await this.handleAppeals(ctx, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_APPROVALS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_APPROVALS_ACTION_PREFIX}:(\\d+)$`), async ctx => {
             if (!ctx.chat) return;
             const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
             await ctx.answerCbQuery();
             await this.handleApproveCounselor(ctx, undefined, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_REMOVALS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_REMOVALS_ACTION_PREFIX}:(\\d+)$`), async ctx => {
             if (!ctx.chat) return;
             const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
             await ctx.answerCbQuery();
             await this.handleRemoveCounselor(ctx, undefined, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_PRAYERS_ACTION_PREFIX}:(\d+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_PRAYERS_ACTION_PREFIX}:(\\d+)$`), async ctx => {
             if (!ctx.chat) return;
             const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
             await ctx.answerCbQuery();
             await this.sendPrayerRequestsToCounselor(ctx, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_HISTORY_ACTION_PREFIX}:(\d+):(.+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_HISTORY_ACTION_PREFIX}:(\\d+):(.+)$`), async ctx => {
             if (!ctx.chat) return;
             const match = ctx.match as RegExpMatchArray;
             const page = parseInt(match[1], 10);
@@ -348,7 +349,7 @@ export class BotHandler {
             await this.sendHistory(ctx, page, sessionId);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_AUDIT_ACTION_PREFIX}:(\d+)(?::(\d+))?$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_AUDIT_ACTION_PREFIX}:(\\d+)(?::(\\d+))?$`), async ctx => {
             if (!ctx.chat) return;
             const match = ctx.match as RegExpMatchArray;
             const page = parseInt(match[1], 10);
@@ -1427,13 +1428,10 @@ export class BotHandler {
             }
 
             const { pageItems, safePage, totalPages } = this.getPagination(logs, page, BotHandler.PAGE_SIZE);
-            const formatted = pageItems.map(log => {
-                const target = log.targetId ? ` | target ${log.targetId}` : '';
-                return `${log.timestamp.toISOString()} | ${log.action}${target} | admin ${log.adminId}`;
-            });
+            const formatted = pageItems.map(log => this.formatAuditLogEntry(log));
 
-            await ctx.reply(`Audit log (${logs.length}):`);
-            await ctx.reply(formatted.join('\n'));
+            await ctx.reply(`🧾 Audit log (${logs.length}):`);
+            await ctx.reply(formatted.join('\n\n'));
             await this.sendPaginationControls(
                 ctx,
                 BotHandler.PAGINATE_AUDIT_ACTION_PREFIX,
@@ -1452,13 +1450,10 @@ export class BotHandler {
 
         const totalPages = Math.max(1, Math.ceil(total / BotHandler.PAGE_SIZE));
         const safePage = Math.min(Math.max(page, 1), totalPages);
-        const formatted = logs.map(log => {
-            const target = log.targetId ? ` | target ${log.targetId}` : '';
-            return `${log.timestamp.toISOString()} | ${log.action}${target} | admin ${log.adminId}`;
-        });
+        const formatted = logs.map(log => this.formatAuditLogEntry(log));
 
-        await ctx.reply(`Audit log (${total}):`);
-        await ctx.reply(formatted.join('\n'));
+        await ctx.reply(`🧾 Audit log (${total}):`);
+        await ctx.reply(formatted.join('\n\n'));
         await this.sendPaginationControls(
             ctx,
             BotHandler.PAGINATE_AUDIT_ACTION_PREFIX,
@@ -1693,6 +1688,81 @@ export class BotHandler {
         if (buttons.length > 0) {
             await ctx.reply(`Page ${page}/${totalPages}`, Markup.inlineKeyboard(buttons));
         }
+    }
+
+    private formatAuditLogEntry(log: AuditLog): string {
+        const timestamp = this.formatTimestamp(log.timestamp);
+        const action = this.formatAuditAction(log.action);
+        const lines = [
+            '📌 Audit Entry',
+            `Time: ${timestamp}`,
+            `Action: ${action}`,
+            `Admin: ${log.adminId}`
+        ];
+
+        if (log.targetId) {
+            lines.push(`Target: ${log.targetId}`);
+        }
+
+        const details = this.formatAuditDetails(log.details);
+        if (details) {
+            lines.push(`Details: ${details}`);
+        }
+
+        return lines.join('\n');
+    }
+
+    private formatTimestamp(timestamp: Date | string): string {
+        const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+        return date.toISOString().replace('T', ' ').replace('Z', ' UTC');
+    }
+
+    private formatAuditAction(action: string): string {
+        return action
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, char => char.toUpperCase());
+    }
+
+    private formatAuditDetails(details?: Record<string, unknown>): string | null {
+        if (!details) {
+            return null;
+        }
+
+        const entries = Object.entries(details);
+        if (entries.length === 0) {
+            return null;
+        }
+
+        const formatted = entries.map(([key, value]) => {
+            const label = key.replace(/_/g, ' ');
+            return `${label}: ${this.formatDetailValue(value)}`;
+        });
+
+        return formatted.join(', ');
+    }
+
+    private formatDetailValue(value: unknown): string {
+        if (value === null || value === undefined) {
+            return 'N/A';
+        }
+
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            return this.trimText(String(value), 120);
+        }
+
+        try {
+            return this.trimText(JSON.stringify(value), 120);
+        } catch {
+            return 'Unsupported';
+        }
+    }
+
+    private trimText(text: string, maxLength: number): string {
+        if (text.length <= maxLength) {
+            return text;
+        }
+
+        return `${text.slice(0, maxLength - 1)}…`;
     }
 
     private async resolveRequester(chatId: number): Promise<{ requesterId: string; requesterType: 'user' | 'counselor' }> {
