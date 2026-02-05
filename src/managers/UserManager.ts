@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Collections } from '../database/Collections';
-import { User } from '../types/User';
+import { User, UserState } from '../types/User';
 import { PrayerRequest } from '../types/PrayerRequest';
 
 export class UserManager {
@@ -29,7 +29,8 @@ export class UserManager {
             uuid,
             telegramChatId,
             createdAt: now,
-            lastActive: now
+            lastActive: now,
+            state: 'IDLE'
         };
 
         try {
@@ -54,7 +55,7 @@ export class UserManager {
                     { $set: { lastActive: new Date() } }
                 );
             }
-            return user;
+            return await this.ensureUserState(user as User | null);
         } catch (error) {
             throw new Error(`Failed to retrieve user by Telegram ID: ${(error as Error).message}`);
         }
@@ -74,10 +75,44 @@ export class UserManager {
                     { $set: { lastActive: new Date() } }
                 );
             }
-            return user;
+            return await this.ensureUserState(user as User | null);
         } catch (error) {
             throw new Error(`Failed to retrieve user by UUID: ${(error as Error).message}`);
         }
+    }
+
+    async getUserStateByTelegramId(telegramChatId: number): Promise<UserState> {
+        const user = await this.getUserByTelegramId(telegramChatId);
+        return user?.state ?? 'IDLE';
+    }
+
+    async updateUserState(userId: string, state: UserState): Promise<void> {
+        await this.collections.users.updateOne(
+            { uuid: userId },
+            { $set: { state } }
+        );
+    }
+
+    async updateUserStateByTelegramId(telegramChatId: number, state: UserState): Promise<void> {
+        const userId = await this.registerUser(telegramChatId);
+        await this.updateUserState(userId, state);
+    }
+
+    private async ensureUserState(user: User | null): Promise<User | null> {
+        if (!user) {
+            return null;
+        }
+
+        if (!user.state) {
+            const defaultState: UserState = 'IDLE';
+            await this.collections.users.updateOne(
+                { uuid: user.uuid },
+                { $set: { state: defaultState } }
+            );
+            return { ...user, state: defaultState };
+        }
+
+        return user;
     }
 
     /**
