@@ -19,8 +19,8 @@ export const validateUser = (user: Partial<User>): user is User => {
     if (!user.createdAt || !(user.createdAt instanceof Date)) {
         throw new ValidationError('User must have a valid createdAt date');
     }
-    if (!user.lastActive || !(user.lastActive instanceof Date)) {
-        throw new ValidationError('User must have a valid lastActive date');
+    if (!user.lastInteraction || !(user.lastInteraction instanceof Date)) {
+        throw new ValidationError('User must have a valid lastInteraction date');
     }
     if (!isValidUserState(user.state)) {
         throw new ValidationError('User state must be a valid state');
@@ -170,7 +170,7 @@ export const sanitizeUserData = (user: User): User => {
         uuid: user.uuid,
         telegramChatId: user.telegramChatId,
         createdAt: user.createdAt,
-        lastActive: user.lastActive,
+        lastInteraction: user.lastInteraction,
         state: user.state
     };
 };
