@@ -5,7 +5,6 @@ import { PrayerRequest } from '../types/PrayerRequest';
 
 export class UserManager {
     private collections: Collections;
-
     constructor(collections: Collections) {
         this.collections = collections;
     }
@@ -89,13 +88,35 @@ export class UserManager {
     async updateUserState(userId: string, state: UserState): Promise<void> {
         await this.collections.users.updateOne(
             { uuid: userId },
-            { $set: { state } }
+            { $set: { state, lastInteraction: new Date() } }
         );
     }
 
-    async updateUserStateByTelegramId(telegramChatId: number, state: UserState): Promise<void> {
-        const userId = await this.registerUser(telegramChatId);
-        await this.updateUserState(userId, state);
+    async updateUserStateByTelegramId(telegramId: number, state: UserState): Promise<void> {
+        await this.collections.users.updateOne(
+            { telegramChatId: telegramId },
+            { $set: { state, lastInteraction: new Date() } }
+        );
+    }
+
+    async updateUserBroadcastData(telegramId: number, data: { target?: 'users' | 'counselors' | 'everyone'; message?: string }): Promise<void> {
+        const updatePayload: Record<string, unknown> = {};
+        if (data.target) {
+            updatePayload['broadcastData.target'] = data.target;
+        }
+        if (data.message) {
+            updatePayload['broadcastData.message'] = data.message;
+        }
+
+        await this.collections.users.updateOne(
+            { telegramChatId: telegramId },
+            { $set: updatePayload }
+        );
+    }
+
+    async getUserState(userId: string): Promise<UserState | null> {
+        const user = await this.collections.users.findOne({ uuid: userId });
+        return user?.state ?? 'IDLE';
     }
 
     private async ensureUserState(user: User | null): Promise<User | null> {
