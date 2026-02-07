@@ -1,4 +1,4 @@
-import { Collection, Db, CreateIndexesOptions } from 'mongodb';
+import { Collection, Db } from 'mongodb';
 import { User } from '../types/User';
 import { Counselor } from '../types/Counselor';
 import { Session } from '../types/Session';
@@ -7,6 +7,7 @@ import { PrayerRequest } from '../types/PrayerRequest';
 import { Report } from '../types/Report';
 import { AuditLog } from '../types/AuditLog';
 import { Appeal } from '../types/Appeal';
+import { BroadcastLog } from '../types/BroadcastLog';
 
 export class Collections {
     private db: Db;
@@ -20,6 +21,7 @@ export class Collections {
     public reports: Collection<Report>;
     public auditLogs: Collection<AuditLog>;
     public appeals: Collection<Appeal>;
+    public broadcastLogs: Collection<BroadcastLog>;
 
     constructor(db: Db) {
         this.db = db;
@@ -33,6 +35,7 @@ export class Collections {
         this.reports = db.collection<Report>('reports');
         this.auditLogs = db.collection<AuditLog>('audit_logs');
         this.appeals = db.collection<Appeal>('appeals');
+        this.broadcastLogs = db.collection<BroadcastLog>('broadcast_logs');
     }
 
     async initializeCollections(): Promise<void> {
@@ -89,6 +92,11 @@ export class Collections {
             await this.appeals.createIndex({ processed: 1 });
             await this.appeals.createIndex({ timestamp: 1 });
 
+            // Create indexes for broadcast logs collection
+            await this.broadcastLogs.createIndex({ broadcastId: 1 }, { unique: true });
+            await this.broadcastLogs.createIndex({ sentByAdminId: 1 });
+            await this.broadcastLogs.createIndex({ sentAt: 1 });
+
             console.log('Successfully initialized all collections and indexes');
         } catch (error) {
             console.error('Error initializing collections:', error);
@@ -105,7 +113,8 @@ export class Collections {
             'prayers',
             'reports',
             'audit_logs',
-            'appeals'
+            'appeals',
+            'broadcast_logs'
         ];
 
         const existingCollections = await this.db.listCollections().toArray();
@@ -130,7 +139,8 @@ export class Collections {
             { name: 'prayers', collection: this.prayers },
             { name: 'reports', collection: this.reports },
             { name: 'audit_logs', collection: this.auditLogs },
-            { name: 'appeals', collection: this.appeals }
+            { name: 'appeals', collection: this.appeals },
+            { name: 'broadcast_logs', collection: this.broadcastLogs }
         ];
 
         for (const { name, collection } of collections) {
