@@ -2,7 +2,8 @@ import { Telegraf, Context, Markup } from 'telegraf';
 import { AppConfig } from '../config/Config';
 import { DatabaseManager } from '../database';
 import { Collections } from '../database/Collections';
-import { UserManager, CounselorManager, SessionManager, ReportingSystem, StatisticsManager, CleanupManager, AuditLogManager } from '../managers';
+import { UserManager, CounselorManager, SessionManager, ReportingSystem, StatisticsManager, CleanupManager, AuditLogManager, BroadcastManager } from '../managers';
+import type { BroadcastTarget } from '../managers/BroadcastManager';
 import { Session } from '../types/Session';
 import { AuditLog } from '../types/AuditLog';
 import { UserState } from '../types/User';
@@ -22,9 +23,12 @@ export class BotHandler {
     private statisticsManager: StatisticsManager | null = null;
     private cleanupManager: CleanupManager | null = null;
     private auditLogManager: AuditLogManager | null = null;
+    private broadcastManager: BroadcastManager | null = null;
     private cleanupInterval: NodeJS.Timeout | null = null;
 
-    private static readonly MENU_START_COUNSELING = '💬 Start Counseling';
+    private broadcastState = new Map<number, { step: 'target' | 'message'; target?: BroadcastTarget; message?: string }>();
+
+    private static readonly MENU_START_COUNSELING = '💬 Start chatting with counselor';
     private static readonly MENU_SUBMIT_PRAYER = '🙏 Submit Prayer Request';
     private static readonly MENU_HISTORY = '📜 My History';
     private static readonly MENU_HELP = 'ℹ️ Help';
@@ -46,6 +50,13 @@ export class BotHandler {
     private static readonly MENU_APPROVE_COUNSELOR = '✅ Approve Counselor';
     private static readonly MENU_REMOVE_COUNSELOR = '🗑️ Remove Counselor';
     private static readonly MENU_AUDIT_LOG = '📜 Audit Log';
+    private static readonly MENU_BROADCAST = '📢 Broadcast Message';
+    private static readonly BROADCAST_TARGET_USERS = '👤 Users';
+    private static readonly BROADCAST_TARGET_COUNSELORS = '🧑‍⚕️ Counselors';
+    private static readonly BROADCAST_TARGET_EVERYONE = '🌍 Everyone';
+    private static readonly BROADCAST_CANCEL = '❌ Cancel';
+    private static readonly BROADCAST_ACTION_CONFIRM = 'broadcast_confirm';
+    private static readonly BROADCAST_ACTION_CANCEL = 'broadcast_cancel';
     private static readonly CONSENT_ACTION_PREFIX = 'consent';
     private static readonly CLOSE_PRAYER_ACTION_PREFIX = 'close_prayer';
     private static readonly REMOVE_COUNSELOR_ACTION_PREFIX = 'remove_counselor';
@@ -87,6 +98,12 @@ export class BotHandler {
         this.auditLogManager = new AuditLogManager(this.collections);
 
         this.bot = new Telegraf(this.config.botToken);
+        this.broadcastManager = new BroadcastManager(
+            this.bot,
+            this.collections.users,
+            this.collections.counselors,
+            this.collections.broadcastLogs
+        );
 
         this.bot.catch(async (error: unknown, ctx) => {
             const err = error as Error;
@@ -242,6 +259,23 @@ export class BotHandler {
         bot.hears(BotHandler.MENU_AUDIT_LOG, async ctx => {
             if (!ctx.chat) return;
             await this.handleAuditLog(ctx);
+        });
+
+        bot.hears(BotHandler.MENU_BROADCAST, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleBroadcastStart(ctx);
+        });
+
+        bot.action(BotHandler.BROADCAST_ACTION_CONFIRM, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleBroadcastConfirm(ctx);
+        });
+
+        bot.action(BotHandler.BROADCAST_ACTION_CANCEL, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleBroadcastCancelAction(ctx);
         });
 
         bot.action(new RegExp(`^${BotHandler.CONSENT_ACTION_PREFIX}:(.+)$`), async ctx => {
@@ -427,6 +461,9 @@ export class BotHandler {
             if (ctx.message.text.startsWith('/')) {
                 return;
             }
+
+            const broadcastHandled = await this.handleBroadcastFlowText(ctx);
+            if (broadcastHandled) return;
 
             if (this.isMenuText(ctx.message.text)) {
                 return;
@@ -1462,6 +1499,129 @@ export class BotHandler {
         );
     }
 
+    private async handleBroadcastStart(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized broadcast access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to send broadcasts.');
+            return;
+        }
+
+        this.broadcastState.set(ctx.chat.id, { step: 'target' });
+        await ctx.reply(
+            'Who should receive this announcement?',
+            Markup.keyboard([
+                [BotHandler.BROADCAST_TARGET_USERS, BotHandler.BROADCAST_TARGET_COUNSELORS],
+                [BotHandler.BROADCAST_TARGET_EVERYONE],
+                [BotHandler.BROADCAST_CANCEL]
+            ]).resize().oneTime()
+        );
+    }
+
+    private async handleBroadcastFlowText(ctx: Context): Promise<boolean> {
+        if (!ctx.chat || !ctx.message || !('text' in ctx.message)) return false;
+
+        const text = ctx.message.text;
+        if (!text) return false;
+
+        const state = this.broadcastState.get(ctx.chat.id);
+        if (!state) return false;
+
+        if (!this.isAdmin(ctx.chat.id)) {
+            this.broadcastState.delete(ctx.chat.id);
+            return false;
+        }
+
+        if (state.step === 'target') {
+            if (text === BotHandler.BROADCAST_CANCEL) {
+                this.broadcastState.delete(ctx.chat.id);
+                const role = await this.getMenuRole(ctx.chat.id);
+                await ctx.reply('Broadcast cancelled.', this.buildMenu('IDLE', role));
+                return true;
+            }
+
+            let target: BroadcastTarget | undefined;
+            if (text === BotHandler.BROADCAST_TARGET_USERS) target = 'users';
+            else if (text === BotHandler.BROADCAST_TARGET_COUNSELORS) target = 'counselors';
+            else if (text === BotHandler.BROADCAST_TARGET_EVERYONE) target = 'everyone';
+
+            if (!target) {
+                await ctx.reply('Please select a valid option: Users, Counselors, Everyone, or Cancel.');
+                return true;
+            }
+
+            state.step = 'message';
+            state.target = target;
+            this.broadcastState.set(ctx.chat.id, state);
+            await ctx.reply('Please type the announcement message:', Markup.removeKeyboard());
+            return true;
+        }
+
+        if (state.step === 'message') {
+            const message = text.trim();
+            if (!message) {
+                await ctx.reply('Please enter a non-empty message.');
+                return true;
+            }
+
+            state.message = message;
+            this.broadcastState.set(ctx.chat.id, state);
+            await ctx.reply(
+                `Preview:\n\n${message}\n\nSend broadcast?`,
+                Markup.inlineKeyboard([
+                    Markup.button.callback('✅ Send', BotHandler.BROADCAST_ACTION_CONFIRM),
+                    Markup.button.callback('❌ Cancel', BotHandler.BROADCAST_ACTION_CANCEL)
+                ])
+            );
+            return true;
+        }
+
+        return false;
+    }
+
+    private async handleBroadcastConfirm(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.broadcastManager) return;
+
+        const state = this.broadcastState.get(ctx.chat.id);
+        if (!state || !state.target || !state.message) {
+            await ctx.reply('Broadcast session expired. Please start again.');
+            this.broadcastState.delete(ctx.chat.id);
+            return;
+        }
+
+        const role = await this.getMenuRole(ctx.chat.id);
+        await ctx.reply('Sending broadcast...');
+
+        try {
+            const { successCount, failedCount } = await this.broadcastManager.executeBroadcast(
+                ctx.chat.id,
+                state.target,
+                state.message
+            );
+            this.broadcastState.delete(ctx.chat.id);
+            await ctx.reply(
+                `Broadcast sent. Success: ${successCount}, Failed: ${failedCount}`,
+                this.buildMenu('IDLE', role)
+            );
+        } catch (error) {
+            const err = error as Error;
+            logger.error('Broadcast failed', { message: err.message, stack: err.stack });
+            this.broadcastState.delete(ctx.chat.id);
+            await ctx.reply(
+                `Broadcast failed: ${err.message}. Please try again.`,
+                this.buildMenu('IDLE', role)
+            );
+        }
+    }
+
+    private async handleBroadcastCancelAction(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+
+        this.broadcastState.delete(ctx.chat.id);
+        const role = await this.getMenuRole(ctx.chat.id);
+        await ctx.reply('Broadcast cancelled.', this.buildMenu('IDLE', role));
+    }
+
     private async handleClosePrayer(ctx: Context, prayerId?: string): Promise<void> {
         if (!ctx.chat || !this.collections || !this.userManager) return;
 
@@ -1563,7 +1723,8 @@ export class BotHandler {
             '/process_report <reportId> <strike|dismiss> - Process report (admins)',
             '/approve_counselor <counselorId> - Approve counselor (admins)',
             '/remove_counselor <counselorId> - Remove counselor (admins)',
-            '/audit_log [limit] - View admin audit log (admins)'
+            '/audit_log [limit] - View admin audit log (admins)',
+            '📢 Broadcast Message - Send system announcements (menu only, admins)'
         ];
 
         const commands = isAdmin
@@ -1908,7 +2069,8 @@ export class BotHandler {
             [BotHandler.MENU_APPEALS],
             [BotHandler.MENU_APPROVE_COUNSELOR],
             [BotHandler.MENU_REMOVE_COUNSELOR],
-            [BotHandler.MENU_AUDIT_LOG]
+            [BotHandler.MENU_AUDIT_LOG],
+            [BotHandler.MENU_BROADCAST]
         ];
 
         const suspendedRows = [
@@ -1987,7 +2149,8 @@ export class BotHandler {
             || text === BotHandler.MENU_APPEALS
             || text === BotHandler.MENU_APPROVE_COUNSELOR
             || text === BotHandler.MENU_REMOVE_COUNSELOR
-            || text === BotHandler.MENU_AUDIT_LOG;
+            || text === BotHandler.MENU_AUDIT_LOG
+            || text === BotHandler.MENU_BROADCAST;
     }
 
     private isAdmin(chatId: number): boolean {
