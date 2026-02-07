@@ -27,7 +27,11 @@ export const generateReportId = (): string => {
 };
 
 export const generateAppealId = (): string => {
-    return `appeal_${uuidv4()}`;
+    return `AL-${generateRandomString(8)}`;
+};
+
+export const generateBroadcastId = (): string => {
+    return `BC-${generateRandomString(10)}`;
 };
 
 export const generateAuditLogId = (): string => {
@@ -71,3 +75,13 @@ export const COLLECTIONS = {
 } as const;
 
 export type CollectionName = typeof COLLECTIONS[keyof typeof COLLECTIONS];
+
+// Helper function to generate random string
+function generateRandomString(length: number): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
