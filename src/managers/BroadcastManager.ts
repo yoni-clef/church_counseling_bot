@@ -29,7 +29,24 @@ export class BroadcastManager {
 
         if (target === 'users' || target === 'everyone') {
             const allUsers = await this.users.find({}, { projection: { telegramChatId: 1 } }).toArray();
-            allUsers.forEach(u => u.telegramChatId && chatIds.add(u.telegramChatId));
+            // When target is 'users' only, exclude counselors (they appear in users table too)
+            const counselorChatIds =
+                target === 'users'
+                    ? new Set(
+                          (
+                              await this.counselors
+                                  .find({}, { projection: { telegramChatId: 1 } })
+                                  .toArray()
+                          )
+                              .map(c => c.telegramChatId)
+                              .filter((id): id is number => id != null)
+                      )
+                    : null;
+            allUsers.forEach(u => {
+                if (u.telegramChatId && !(counselorChatIds?.has(u.telegramChatId))) {
+                    chatIds.add(u.telegramChatId);
+                }
+            });
         }
 
         if (target === 'counselors' || target === 'everyone') {
