@@ -40,7 +40,7 @@ export class BotHandler {
     private static readonly MENU_STATUS_AWAY = '⚪ Set Away';
     private static readonly MENU_MY_STATS = '📊 My Stats';
     private static readonly MENU_PRAYER_REQUESTS = '🙏 Prayer Requests';
-    private static readonly MENU_CLOSE_PRAYER = '✅ Close Prayer';
+    private static readonly MENU_CLOSE_PRAYER = '✅ Close Prayers';
     private static readonly MENU_ADMIN_STATS = '🛡️ Admin Stats';
     private static readonly MENU_PENDING_REPORTS = '🚩 Pending Reports';
     private static readonly MENU_PROCESS_REPORT = '⚙️ Process Report';
@@ -62,6 +62,7 @@ export class BotHandler {
     private static readonly REMOVE_COUNSELOR_ACTION_PREFIX = 'remove_counselor';
     private static readonly APPROVE_COUNSELOR_ACTION_PREFIX = 'approve_counselor';
     private static readonly PROCESS_REPORT_ACTION_PREFIX = 'pr';
+    private static readonly VIEW_REPORT_CHAT_ACTION_PREFIX = 'vrc';
     private static readonly REVOKE_SUSPENSION_ACTION_PREFIX = 'rs';
     private static readonly REAPPROVE_ACTION_PREFIX = 'ap';
     private static readonly APPEAL_ACTION_PREFIX = 'al';
@@ -321,6 +322,13 @@ export class BotHandler {
             const actionToken = match[2];
             const action = actionToken === 's' ? 'strike' : 'dismiss';
             await this.processReportAction(ctx, reportId, action);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.VIEW_REPORT_CHAT_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const reportId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleViewReportChat(ctx, reportId);
         });
 
         bot.action(new RegExp(`^${BotHandler.APPEAL_ACTION_PREFIX}:(.+):(r|a)$`), async ctx => {
@@ -865,7 +873,7 @@ export class BotHandler {
 
         const existing = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
         if (existing) {
-            await ctx.reply(`You are already registered. Counselor ID: ${existing.id}. Await admin approval.`);
+            await ctx.reply(`You are already registered. Counselor ID: ${existing.id}`);
             return;
         }
 
@@ -934,14 +942,22 @@ export class BotHandler {
             await ctx.reply(
                 message,
                 Markup.inlineKeyboard([
-                    Markup.button.callback(
-                        '⚠️ Strike',
-                        `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:s`
-                    ),
-                    Markup.button.callback(
-                        '✅ Dismiss',
-                        `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:d`
-                    )
+                    [
+                        Markup.button.callback(
+                            '💬 View Chat',
+                            `${BotHandler.VIEW_REPORT_CHAT_ACTION_PREFIX}:${report.reportId}`
+                        )
+                    ],
+                    [
+                        Markup.button.callback(
+                            '⚠️ Strike',
+                            `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:s`
+                        ),
+                        Markup.button.callback(
+                            '✅ Dismiss',
+                            `${BotHandler.PROCESS_REPORT_ACTION_PREFIX}:${report.reportId}:d`
+                        )
+                    ]
                 ])
             );
         }
@@ -952,6 +968,64 @@ export class BotHandler {
             safePage,
             totalPages
         );
+    }
+
+    private async handleViewReportChat(ctx: Context, reportId: string): Promise<void> {
+        if (!ctx.chat || !this.sessionManager || !this.collections) return;
+        if (!this.isAdmin(ctx.chat.id)) {
+            logger.warn('Unauthorized view report chat access', { chatId: ctx.chat.id });
+            await ctx.reply('You are not authorized to view report chats.');
+            return;
+        }
+
+        const report = await this.collections.reports.findOne({ reportId });
+        if (!report) {
+            await ctx.reply('Report not found.');
+            return;
+        }
+
+        try {
+            const messages = await this.sessionManager.getMessageHistoryForAdmin(report.sessionId);
+            if (messages.length === 0) {
+                await ctx.reply(
+                    `No messages in session ${report.sessionId}.\n\nReport: ${report.reason}`
+                );
+                return;
+            }
+
+            const formatted = messages.map(msg => {
+                const senderLabel = msg.senderType === 'user' ? 'User' : 'Counselor';
+                const ts = msg.timestamp instanceof Date
+                    ? msg.timestamp.toISOString()
+                    : new Date(msg.timestamp).toISOString();
+                return `[${ts}] ${senderLabel}: ${msg.content}`;
+            });
+
+            const header = `💬 Session chat (Report ID: ${report.reportId}, Counselor: ${report.counselorId})\nReason: ${report.reason}\n\n`;
+            const fullText = header + formatted.join('\n');
+
+            const TELEGRAM_MAX_LENGTH = 4096;
+            if (fullText.length <= TELEGRAM_MAX_LENGTH) {
+                await ctx.reply(fullText);
+            } else {
+                await ctx.reply(header.trim());
+                let currentChunk = '';
+                for (const line of formatted) {
+                    if (currentChunk.length + line.length + 1 > TELEGRAM_MAX_LENGTH && currentChunk) {
+                        await ctx.reply(currentChunk);
+                        currentChunk = '';
+                    }
+                    currentChunk += (currentChunk ? '\n' : '') + line;
+                }
+                if (currentChunk) {
+                    await ctx.reply(currentChunk);
+                }
+            }
+        } catch (error) {
+            const err = error as Error;
+            logger.error('Failed to fetch report chat', { reportId, message: err.message });
+            await ctx.reply(`Failed to load chat: ${err.message}`);
+        }
     }
 
     private async handleProcessReport(ctx: Context, args?: string): Promise<void> {
@@ -1171,7 +1245,7 @@ export class BotHandler {
         } else {
             const result = await this.collections.counselors.updateOne(
                 { id: counselor.id },
-                { $set: { isSuspended: false, status: 'away', lastActive: new Date() } }
+                { $set: { isSuspended: false, isApproved: true, status: 'away', lastActive: new Date(), strikes: 0 } }
             );
 
             if (result.matchedCount === 0) {
@@ -1200,7 +1274,7 @@ export class BotHandler {
                 ? 'Your appeal has been approved. Your counseling access has been restored.'
                 : 'Your appeal has been reviewed. Your suspension has been revoked.';
             try {
-                await this.bot.telegram.sendMessage(counselor.telegramChatId, notification);
+                await this.sendMenuToChatId(counselor.telegramChatId, 'IDLE', notification);
             } catch (error) {
                 const err = error as Error;
                 logger.warn('Failed to notify counselor about appeal decision', {
@@ -1221,7 +1295,7 @@ export class BotHandler {
 
         const result = await this.collections.counselors.updateOne(
             { id: counselorId },
-            { $set: { isSuspended: false, status: 'away', lastActive: new Date() } }
+            { $set: { isSuspended: false, isApproved: true, status: 'away', lastActive: new Date(), strikes: 0 } }
         );
 
         if (result.matchedCount === 0) {
@@ -1235,8 +1309,9 @@ export class BotHandler {
         const counselor = await this.collections.counselors.findOne({ id: counselorId });
         if (counselor?.telegramChatId && this.bot) {
             try {
-                await this.bot.telegram.sendMessage(
+                await this.sendMenuToChatId(
                     counselor.telegramChatId,
+                    'IDLE',
                     'Your suspension has been revoked. You can now set your status again.'
                 );
             } catch (error) {
@@ -1634,7 +1709,7 @@ export class BotHandler {
         if (!prayerId) {
             await ctx.reply('Select a prayer request to close:');
             await this.sendPrayerRequestsToCounselor(ctx);
-            await ctx.reply('Use /close_prayer <prayerId> to close one.');
+    
             return;
         }
 
