@@ -10,6 +10,64 @@ import { UserState } from '../types/User';
 import { generateAppealId } from '../models/utils';
 import { logger } from '../utils/logger';
 
+type CounselorOnboardingStep =
+    | 'full_name'
+    | 'telegram_username'
+    | 'languages'
+    | 'languages_other'
+    | 'domains'
+    | 'domains_other'
+    | 'experience'
+    | 'country'
+    | 'location'
+    | 'confirm';
+
+interface CounselorOnboardingData {
+    fullName?: string;
+    telegramUsername?: string;
+    languages: string[];
+    domains: string[];
+    yearsExperience?: number;
+    country?: string;
+    location?: string;
+}
+
+interface CounselorOnboardingState {
+    step: CounselorOnboardingStep;
+    data: CounselorOnboardingData;
+}
+
+type MatchingStep = 'language' | 'language_other' | 'domain' | 'domain_other' | 'consent';
+
+interface MatchingState {
+    step: MatchingStep;
+    languages: string[];
+    domain?: string;
+}
+
+type TransferStep = 'reason' | 'reason_other' | 'request_sent';
+
+interface TransferState {
+    step: TransferStep;
+    sessionId: string;
+    counselorId: string;
+    userId: string;
+    languages: string[];
+    domain: string;
+    reason?: string;
+}
+
+interface PendingTransfer {
+    sessionId: string;
+    fromCounselorId: string;
+    userId: string;
+    domain: string;
+    languages: string[];
+    reason: string;
+    candidateIds: string[];
+    candidateIndex: number;
+}
+
 // Bot Handler Component - Central message routing and command processing
 export class BotHandler {
     private config: AppConfig;
@@ -27,6 +85,10 @@ export class BotHandler {
     private cleanupInterval: NodeJS.Timeout | null = null;
 
     private broadcastState = new Map<number, { step: 'target' | 'message'; target?: BroadcastTarget; message?: string }>();
+    private counselorOnboardingState = new Map<number, CounselorOnboardingState>();
+    private matchingState = new Map<number, MatchingState>();
+    private transferState = new Map<number, TransferState>();
+    private pendingTransfers = new Map<string, PendingTransfer>();
 
     private static readonly MENU_START_COUNSELING = '💬 Start chatting with counselor';
     private static readonly MENU_SUBMIT_PRAYER = '🙏 Submit Prayer Request';
@@ -41,6 +103,7 @@ export class BotHandler {
     private static readonly MENU_MY_STATS = '📊 My Stats';
     private static readonly MENU_PRAYER_REQUESTS = '🙏 Prayer Requests';
     private static readonly MENU_CLOSE_PRAYER = '✅ Close Prayers';
+    private static readonly MENU_TRANSFER_SESSION = '🔁 Transfer Session to Expert';
     private static readonly MENU_ADMIN_STATS = '🛡️ Admin Stats';
     private static readonly MENU_PENDING_REPORTS = '🚩 Pending Reports';
     private static readonly MENU_PROCESS_REPORT = '⚙️ Process Report';
@@ -57,6 +120,28 @@ export class BotHandler {
     private static readonly BROADCAST_CANCEL = '❌ Cancel';
     private static readonly BROADCAST_ACTION_CONFIRM = 'broadcast_confirm';
     private static readonly BROADCAST_ACTION_CANCEL = 'broadcast_cancel';
+    private static readonly RATE_SESSION_ACTION_PREFIX = 'rate_session';
+    private static readonly MATCHING_LANG_ACTION_PREFIX = 'match_lang';
+    private static readonly MATCHING_LANG_DONE = 'match_lang_done';
+    private static readonly MATCHING_DOMAIN_ACTION_PREFIX = 'match_dom';
+    private static readonly MATCHING_BACK = 'match_back';
+    private static readonly MATCHING_CANCEL = 'match_cancel';
+    private static readonly MATCHING_RETRY_LANG = 'match_retry_lang';
+    private static readonly MATCHING_WAIT = 'match_wait';
+    private static readonly TRANSFER_REASON_ACTION_PREFIX = 'transfer_reason';
+    private static readonly TRANSFER_ACCEPT_ACTION_PREFIX = 'transfer_accept';
+    private static readonly TRANSFER_DECLINE_ACTION_PREFIX = 'transfer_decline';
+    private static readonly TRANSFER_OPTION_CONTINUE = 'transfer_continue';
+    private static readonly TRANSFER_OPTION_WAIT = 'transfer_wait';
+    private static readonly TRANSFER_OPTION_END = 'transfer_end';
+    private static readonly TRANSFER_CANCEL = 'transfer_cancel';
+    private static readonly COUNSELOR_ONBOARDING_LANG_ACTION_PREFIX = 'co_lang';
+    private static readonly COUNSELOR_ONBOARDING_DOMAIN_ACTION_PREFIX = 'co_dom';
+    private static readonly COUNSELOR_ONBOARDING_LANG_DONE = 'co_lang_done';
+    private static readonly COUNSELOR_ONBOARDING_DOMAIN_DONE = 'co_dom_done';
+    private static readonly COUNSELOR_ONBOARDING_BACK = 'co_back';
+    private static readonly COUNSELOR_ONBOARDING_CANCEL = 'co_cancel';
+    private static readonly COUNSELOR_ONBOARDING_CONFIRM = 'co_confirm';
     private static readonly CONSENT_ACTION_PREFIX = 'consent';
     private static readonly CLOSE_PRAYER_ACTION_PREFIX = 'close_prayer';
     private static readonly REMOVE_COUNSELOR_ACTION_PREFIX = 'remove_counselor';
@@ -72,9 +157,32 @@ export class BotHandler {
     private static readonly PAGINATE_APPROVALS_ACTION_PREFIX = 'pgap';
     private static readonly PAGINATE_REMOVALS_ACTION_PREFIX = 'pgrm';
     private static readonly PAGINATE_PRAYERS_ACTION_PREFIX = 'pgp';
-    private static readonly PAGINATE_HISTORY_ACTION_PREFIX = 'pgh';
+    private static readonly PAGINATE_HISTORY_LIST_ACTION_PREFIX = 'pghl';
+    private static readonly PAGINATE_HISTORY_CHAT_ACTION_PREFIX = 'pghc';
+    private static readonly VIEW_HISTORY_CHAT_ACTION_PREFIX = 'vhc';
     private static readonly PAGINATE_AUDIT_ACTION_PREFIX = 'pgal';
     private static readonly PAGE_SIZE = 10;
+    private static readonly HISTORY_CHAT_PAGE_SIZE = 25;
+    private static readonly COUNSELOR_LANGUAGES = ['English', 'Amharic', 'Afaan Oromo', 'Tigrinya', 'Other'];
+    private static readonly COUNSELOR_DOMAINS = [
+        'Mental Health Support',
+        'Anxiety',
+        'Depression',
+        'Relationship Counseling',
+        'Marriage Counseling',
+        'Spiritual Guidance',
+        'Grief / Loss',
+        'Addiction Recovery',
+        'Youth Counseling',
+        'Other'
+    ];
+    private static readonly TRANSFER_REASONS = [
+        'Outside my expertise',
+        'Language mismatch',
+        'User needs specialized support',
+        'Technical issue',
+        'Other'
+    ];
 
     constructor(config: AppConfig) {
         this.config = config;
@@ -145,6 +253,45 @@ export class BotHandler {
         }
 
         const bot = this.bot;
+
+        bot.use(async (ctx, next) => {
+            if (!ctx.chat || !this.userManager) {
+                return next();
+            }
+
+            if (this.isAdmin(ctx.chat.id)) {
+                return next();
+            }
+
+            const userState = await this.userManager.getUserStateByTelegramId(ctx.chat.id);
+            if (userState !== 'RATING_REQUIRED') {
+                return next();
+            }
+
+            const callbackData = ctx.callbackQuery && 'data' in ctx.callbackQuery
+                ? ctx.callbackQuery.data
+                : undefined;
+            if (callbackData && callbackData.startsWith(BotHandler.RATE_SESSION_ACTION_PREFIX)) {
+                return next();
+            }
+            if (callbackData && callbackData.startsWith(BotHandler.CONSENT_ACTION_PREFIX)) {
+                return next();
+            }
+
+            const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+            if (requesterType !== 'user') {
+                return next();
+            }
+
+            const pendingSession = await this.findPendingRatingSession(requesterId);
+            if (!pendingSession) {
+                await this.userManager.updateUserState(requesterId, 'IDLE');
+                return next();
+            }
+
+            await this.sendRatingPrompt(ctx, pendingSession.sessionId);
+            return undefined;
+        });
 
         bot.start(async ctx => {
             if (!ctx.chat) return;
@@ -217,6 +364,11 @@ export class BotHandler {
             await this.handleClosePrayer(ctx);
         });
 
+        bot.hears(BotHandler.MENU_TRANSFER_SESSION, async ctx => {
+            if (!ctx.chat) return;
+            await this.handleTransferStart(ctx);
+        });
+
         bot.hears(BotHandler.MENU_ADMIN_STATS, async ctx => {
             if (!ctx.chat) return;
             await this.handleAdminStats(ctx);
@@ -277,6 +429,151 @@ export class BotHandler {
             if (!ctx.chat) return;
             await ctx.answerCbQuery();
             await this.handleBroadcastCancelAction(ctx);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.RATE_SESSION_ACTION_PREFIX}:(.+):(\\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const match = ctx.match as RegExpMatchArray;
+            const sessionId = match[1];
+            const rating = Number.parseInt(match[2], 10);
+            await ctx.answerCbQuery();
+            await this.handleSessionRating(ctx, sessionId, rating);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.MATCHING_LANG_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const language = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleMatchingLanguageSelect(ctx, language);
+        });
+
+        bot.action(BotHandler.MATCHING_LANG_DONE, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleMatchingLanguageDone(ctx);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.MATCHING_DOMAIN_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const domain = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleMatchingDomainSelect(ctx, domain);
+        });
+
+        bot.action(BotHandler.MATCHING_BACK, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleMatchingBack(ctx);
+        });
+
+        bot.action(BotHandler.MATCHING_CANCEL, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleMatchingCancel(ctx);
+        });
+
+        bot.action(BotHandler.MATCHING_RETRY_LANG, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleMatchingRetryLanguage(ctx);
+        });
+
+        bot.action(BotHandler.MATCHING_WAIT, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleMatchingWait(ctx);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.TRANSFER_REASON_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const reason = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleTransferReasonSelect(ctx, reason);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.TRANSFER_ACCEPT_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const sessionId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleTransferAccept(ctx, sessionId);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.TRANSFER_DECLINE_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const sessionId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleTransferDecline(ctx, sessionId);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.TRANSFER_OPTION_CONTINUE}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const sessionId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleTransferContinue(ctx, sessionId);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.TRANSFER_OPTION_WAIT}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const sessionId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleTransferWait(ctx, sessionId);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.TRANSFER_OPTION_END}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const sessionId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleTransferEnd(ctx, sessionId);
+        });
+
+        bot.action(BotHandler.TRANSFER_CANCEL, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleTransferCancel(ctx);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.COUNSELOR_ONBOARDING_LANG_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const language = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingLanguageSelect(ctx, language);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.COUNSELOR_ONBOARDING_DOMAIN_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const domain = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingDomainSelect(ctx, domain);
+        });
+
+        bot.action(BotHandler.COUNSELOR_ONBOARDING_LANG_DONE, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingLanguagesDone(ctx);
+        });
+
+        bot.action(BotHandler.COUNSELOR_ONBOARDING_DOMAIN_DONE, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingDomainsDone(ctx);
+        });
+
+        bot.action(BotHandler.COUNSELOR_ONBOARDING_BACK, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingBack(ctx);
+        });
+
+        bot.action(BotHandler.COUNSELOR_ONBOARDING_CANCEL, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingCancel(ctx);
+        });
+
+        bot.action(BotHandler.COUNSELOR_ONBOARDING_CONFIRM, async ctx => {
+            if (!ctx.chat) return;
+            await ctx.answerCbQuery();
+            await this.handleCounselorOnboardingConfirm(ctx);
         });
 
         bot.action(new RegExp(`^${BotHandler.CONSENT_ACTION_PREFIX}:(.+)$`), async ctx => {
@@ -382,13 +679,27 @@ export class BotHandler {
             await this.sendPrayerRequestsToCounselor(ctx, page);
         });
 
-        bot.action(new RegExp(`^${BotHandler.PAGINATE_HISTORY_ACTION_PREFIX}:(\\d+):(.+)$`), async ctx => {
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_HISTORY_LIST_ACTION_PREFIX}:(\d+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const page = parseInt((ctx.match as RegExpMatchArray)[1], 10);
+            await ctx.answerCbQuery();
+            await this.handleHistoryList(ctx, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.PAGINATE_HISTORY_CHAT_ACTION_PREFIX}:(\d+):(.+)$`), async ctx => {
             if (!ctx.chat) return;
             const match = ctx.match as RegExpMatchArray;
             const page = parseInt(match[1], 10);
             const sessionId = match[2];
             await ctx.answerCbQuery();
-            await this.sendHistory(ctx, page, sessionId);
+            await this.sendHistoryChat(ctx, sessionId, page);
+        });
+
+        bot.action(new RegExp(`^${BotHandler.VIEW_HISTORY_CHAT_ACTION_PREFIX}:(.+)$`), async ctx => {
+            if (!ctx.chat) return;
+            const sessionId = (ctx.match as RegExpMatchArray)[1];
+            await ctx.answerCbQuery();
+            await this.sendHistoryChat(ctx, sessionId, 1);
         });
 
         bot.action(new RegExp(`^${BotHandler.PAGINATE_AUDIT_ACTION_PREFIX}:(\\d+)(?::(\\d+))?$`), async ctx => {
@@ -478,6 +789,22 @@ export class BotHandler {
             }
 
             const userState = await this.userManager!.getUserStateByTelegramId(ctx.chat.id);
+
+            if (userState === 'MATCHING') {
+                await this.handleMatchingText(ctx, ctx.message.text);
+                return;
+            }
+
+            const transferState = this.transferState.get(ctx.chat.id);
+            if (transferState && transferState.step === 'reason_other') {
+                await this.handleTransferReasonText(ctx, ctx.message.text);
+                return;
+            }
+
+            if (userState === 'COUNSELOR_ONBOARDING') {
+                await this.handleCounselorOnboardingText(ctx, ctx.message.text);
+                return;
+            }
 
             if (userState === 'SUBMITTING_PRAYER') {
                 await this.handlePrayerTitle(ctx, ctx.message.text);
@@ -598,15 +925,7 @@ export class BotHandler {
             return;
         }
 
-        await this.userManager.updateUserState(userId, 'WAITING_COUNSELOR');
-        await ctx.reply(this.sessionManager.getConsentDisclosureText());
-        await ctx.reply(
-            'Tap the button below to provide consent and start your session.',
-            Markup.inlineKeyboard([
-                Markup.button.callback('✅ I Consent', `${BotHandler.CONSENT_ACTION_PREFIX}:${userId}`)
-            ])
-        );
-        await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'You can return to the main menu at any time.');
+        await this.startMatchingFlow(ctx);
     }
 
     private async handleConsent(ctx: Context, userId: string): Promise<void> {
@@ -619,40 +938,52 @@ export class BotHandler {
                 return;
             }
 
-            if (user.state !== 'WAITING_COUNSELOR') {
+            if (user.state !== 'MATCHING' && user.state !== 'WAITING_COUNSELOR') {
                 await ctx.reply('No pending consent request. Use Start Counseling to begin.');
                 return;
             }
 
-            const maxAttempts = 3;
-            let counselorId: string | null = null;
-            let counselor: { telegramChatId: number } | null = null;
-
-            for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-                const candidateId = await this.counselorManager.getAvailableCounselor();
-                if (!candidateId) {
-                    break;
-                }
-
-                const candidate = await this.collections.counselors.findOne({ id: candidateId });
-                if (!candidate || candidate.telegramChatId === ctx.chat.id) {
-                    continue;
-                }
-
-                const activeSession = await this.sessionManager.getActiveSessionForCounselor(candidateId);
-                if (activeSession) {
-                    continue;
-                }
-
-                counselorId = candidateId;
-                counselor = candidate;
-                break;
-            }
-
-            if (!counselorId || !counselor) {
-                await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'No counselors are available right now. Please try again later.');
+            const matching = this.matchingState.get(ctx.chat.id);
+            const preferredLanguages = matching?.languages ?? user.user_preferred_language ?? [];
+            const requestedDomain = matching?.domain ?? user.user_requested_domain;
+            if (!requestedDomain || preferredLanguages.length === 0) {
+                await ctx.reply('Missing matching preferences. Please select your language and domain again.');
+                await this.startMatchingFlow(ctx);
                 return;
             }
+
+            if (matching && matching.step !== 'consent') {
+                await ctx.reply('Please complete the matching steps before giving consent.');
+                return;
+            }
+
+            await ctx.reply('Finding a suitable counselor...');
+
+            const matchResult = await this.findBestCounselorMatch(preferredLanguages, requestedDomain, ctx.chat.id);
+            if (!matchResult) {
+                await this.replyWithMenu(ctx, 'IDLE', 'No counselors are available right now. Please try again later.');
+                this.matchingState.delete(ctx.chat.id);
+                await this.userManager.updateUserState(userId, 'IDLE');
+                return;
+            }
+
+            if ('reason' in matchResult) {
+                if (matchResult.reason === 'no_language_match') {
+                    await ctx.reply(
+                        'No counselors match your language right now. You can choose another language or wait.',
+                        this.buildMatchingNoLanguageKeyboard()
+                    );
+                    return;
+                }
+
+                await this.replyWithMenu(ctx, 'IDLE', 'No counselors are available right now. Please try again later.');
+                this.matchingState.delete(ctx.chat.id);
+                await this.userManager.updateUserState(userId, 'IDLE');
+                return;
+            }
+
+            const counselorId = matchResult.counselorId;
+            const counselor = matchResult.counselor;
 
             let session: Session;
             try {
@@ -660,7 +991,7 @@ export class BotHandler {
             } catch (error) {
                 const err = error as Error;
                 if (err.message.includes('Counselor already has an active session')) {
-                    await this.replyWithMenu(ctx, 'WAITING_COUNSELOR', 'No counselors are available right now. Please try again later.');
+                    await this.replyWithMenu(ctx, 'IDLE', 'No counselors are available right now. Please try again later.');
                     return;
                 }
                 throw error;
@@ -671,6 +1002,7 @@ export class BotHandler {
             );
 
             await this.userManager.updateUserState(user.uuid, 'IN_SESSION');
+            this.matchingState.delete(ctx.chat.id);
 
             await this.replyWithMenu(ctx, 'IN_SESSION', `Session started. Your counselor has been notified. Session ID: ${session.sessionId}`);
         } catch (error) {
@@ -700,9 +1032,9 @@ export class BotHandler {
         await this.sessionManager.endSession(session.sessionId);
 
         if (requesterType === 'user') {
-            await this.userManager.updateUserState(requesterId, 'POST_SESSION');
-            await this.replyWithMenu(ctx, 'POST_SESSION', 'Session ended. Thank you. You can report the counselor from the menu below if needed.');
-            const counselorChatId = await this.resolveChatId(session.counselorId, 'counselor');
+            await this.userManager.updateUserState(requesterId, 'RATING_REQUIRED');
+            await this.sendRatingPrompt(ctx, session.sessionId);
+            const counselorChatId = await this.resolveChatId(this.getSessionCounselorId(session), 'counselor');
             if (counselorChatId) {
                 await this.bot!.telegram.sendMessage(counselorChatId, 'Session has ended. The user ended the session.');
             }
@@ -710,26 +1042,843 @@ export class BotHandler {
             await ctx.reply('Session ended.');
             const userChatId = await this.resolveChatId(session.userId, 'user');
             if (userChatId) {
-                await this.sendMenuToChatId(
+                await this.bot!.telegram.sendMessage(
                     userChatId,
-                    'POST_SESSION',
-                    'Your session has ended. Thank you. You can report the counselor from the menu below if needed.'
+                    'Your session has ended. Please rate your counselor (1-5). Rating is required to continue.',
+                    this.buildRatingKeyboard(session.sessionId)
                 );
             }
-            await this.userManager.updateUserState(session.userId, 'POST_SESSION');
+            await this.userManager.updateUserState(session.userId, 'RATING_REQUIRED');
         }
 
         if (this.counselorManager) {
             try {
-                await this.counselorManager.setAvailability(session.counselorId, 'available', 'system');
+                await this.counselorManager.setAvailability(this.getSessionCounselorId(session), 'available', 'system');
             } catch (error) {
                 const err = error as Error;
                 logger.warn('Failed to update counselor availability after session end', {
-                    counselorId: session.counselorId,
+                    counselorId: this.getSessionCounselorId(session),
                     message: err.message
                 });
             }
         }
+    }
+
+    private async handleSessionRating(ctx: Context, sessionId: string, rating: number): Promise<void> {
+        if (!ctx.chat || !this.userManager || !this.sessionManager) return;
+
+        const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+        if (requesterType !== 'user') {
+            await ctx.reply('Only users can rate sessions.');
+            return;
+        }
+
+        try {
+            await this.sessionManager.rateSession(sessionId, requesterId, rating);
+        } catch (error) {
+            const err = error as Error;
+            await ctx.reply(err.message || 'Unable to record rating.');
+            return;
+        }
+
+        await this.userManager.updateUserState(requesterId, 'POST_SESSION');
+        await this.replyWithMenu(
+            ctx,
+            'POST_SESSION',
+            `Thanks for rating. You rated this session ${rating}/5. You can report the counselor from the menu below if needed.`
+        );
+    }
+
+    private buildRatingKeyboard(sessionId: string) {
+        const buttons = [1, 2, 3, 4, 5].map(score =>
+            Markup.button.callback(`${score}`, `${BotHandler.RATE_SESSION_ACTION_PREFIX}:${sessionId}:${score}`)
+        );
+
+        return Markup.inlineKeyboard([
+            [buttons[0], buttons[1], buttons[2], buttons[3], buttons[4]]
+        ]);
+    }
+
+    private async sendRatingPrompt(ctx: Context, sessionId: string): Promise<void> {
+        await ctx.reply(
+            'Session ended. Please rate your counselor (1-5). Rating is required to continue.',
+            this.buildRatingKeyboard(sessionId)
+        );
+    }
+
+    private async handleTransferStart(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.sessionManager) return;
+
+        const counselor = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!counselor || !counselor.isApproved || counselor.isSuspended) {
+            await ctx.reply('You are not approved to transfer sessions.');
+            return;
+        }
+
+        const session = await this.sessionManager.getActiveSessionForCounselor(counselor.id);
+        if (!session) {
+            await ctx.reply('No active session to transfer.');
+            return;
+        }
+
+        const { languages, domain } = await this.getSessionPreferences(session);
+        if (!domain || languages.length === 0) {
+            await ctx.reply('Unable to determine session preferences. Please continue or end the session.');
+            return;
+        }
+
+        const state: TransferState = {
+            sessionId: session.sessionId,
+            counselorId: counselor.id,
+            userId: session.userId,
+            languages,
+            domain,
+            step: 'reason'
+        };
+
+        this.transferState.set(ctx.chat.id, state);
+        await ctx.reply('Select the transfer reason:', this.buildTransferReasonKeyboard());
+    }
+
+    private async handleTransferReasonSelect(ctx: Context, reason: string): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.transferState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (reason === 'Other') {
+            state.step = 'reason_other';
+            await ctx.reply('Please enter the transfer reason.', Markup.inlineKeyboard([[
+                Markup.button.callback('❌ Cancel', BotHandler.TRANSFER_CANCEL)
+            ]]));
+            return;
+        }
+
+        state.reason = reason;
+        state.step = 'request_sent';
+        await this.initiateTransferSearch(ctx, state);
+    }
+
+    private async handleTransferReasonText(ctx: Context, text: string): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.transferState.get(ctx.chat.id);
+        if (!state) return;
+
+        const reason = text.trim();
+        if (!reason) {
+            await ctx.reply('Please enter a reason for the transfer.');
+            return;
+        }
+
+        state.reason = reason;
+        state.step = 'request_sent';
+        await this.initiateTransferSearch(ctx, state);
+    }
+
+    private async initiateTransferSearch(ctx: Context, state: TransferState): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.sessionManager) return;
+
+        if (!state.reason) {
+            await ctx.reply('Transfer reason is required.');
+            return;
+        }
+
+        const candidates = await this.findTransferCandidates(state.languages, state.domain, state.counselorId);
+        if (candidates.length === 0) {
+            await ctx.reply(
+                'No matching expert counselors are available. Choose an option below.',
+                this.buildTransferFallbackKeyboard(state.sessionId)
+            );
+            this.transferState.delete(ctx.chat.id);
+            return;
+        }
+
+        const pending: PendingTransfer = {
+            sessionId: state.sessionId,
+            fromCounselorId: state.counselorId,
+            userId: state.userId,
+            domain: state.domain,
+            languages: state.languages,
+            reason: state.reason,
+            candidateIds: candidates,
+            candidateIndex: 0
+        };
+
+        this.pendingTransfers.set(state.sessionId, pending);
+        await ctx.reply('Transfer request sent. Waiting for counselor response...');
+        await this.sendTransferRequestToCandidate(pending);
+    }
+
+    private async handleTransferAccept(ctx: Context, sessionId: string): Promise<void> {
+        if (!ctx.chat || !this.collections || !this.sessionManager || !this.counselorManager) return;
+
+        const pending = this.pendingTransfers.get(sessionId);
+        if (!pending) {
+            await ctx.reply('This transfer request is no longer active.');
+            return;
+        }
+
+        const candidate = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!candidate) {
+            await ctx.reply('Unable to accept transfer.');
+            return;
+        }
+
+        const expectedId = pending.candidateIds[pending.candidateIndex];
+        if (candidate.id !== expectedId) {
+            await ctx.reply('This transfer request has expired.');
+            return;
+        }
+
+        await this.sessionManager.transferSession(sessionId, pending.fromCounselorId, candidate.id, pending.reason);
+
+        try {
+            await this.counselorManager.setAvailability(pending.fromCounselorId, 'available', 'system');
+            await this.counselorManager.setAvailability(candidate.id, 'busy', 'system');
+        } catch (error) {
+            const err = error as Error;
+            logger.warn('Failed to update counselor status after transfer', { message: err.message });
+        }
+
+        const oldCounselorChatId = await this.resolveChatId(pending.fromCounselorId, 'counselor');
+        if (oldCounselorChatId) {
+            await this.bot!.telegram.sendMessage(oldCounselorChatId, 'Session successfully transferred.');
+        }
+
+        const userChatId = await this.resolveChatId(pending.userId, 'user');
+        if (userChatId) {
+            await this.bot!.telegram.sendMessage(
+                userChatId,
+                'Your session has been transferred to another counselor with appropriate expertise to better support you.'
+            );
+        }
+
+        await this.bot!.telegram.sendMessage(
+            ctx.chat.id,
+            'You are now connected to the user. Chat history is available.'
+        );
+        await this.sendSessionHistoryToCounselor(sessionId, candidate.id, ctx.chat.id);
+
+        this.pendingTransfers.delete(sessionId);
+        this.transferState.forEach((value, key) => {
+            if (value.sessionId === sessionId) {
+                this.transferState.delete(key);
+            }
+        });
+    }
+
+    private async handleTransferDecline(ctx: Context, sessionId: string): Promise<void> {
+        if (!ctx.chat || !this.collections) return;
+
+        const pending = this.pendingTransfers.get(sessionId);
+        if (!pending) {
+            await ctx.reply('This transfer request is no longer active.');
+            return;
+        }
+
+        const candidate = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (!candidate) {
+            await ctx.reply('Unable to decline transfer.');
+            return;
+        }
+
+        const expectedId = pending.candidateIds[pending.candidateIndex];
+        if (candidate.id !== expectedId) {
+            await ctx.reply('This transfer request has expired.');
+            return;
+        }
+
+        pending.candidateIndex += 1;
+        if (pending.candidateIndex >= pending.candidateIds.length) {
+            this.pendingTransfers.delete(sessionId);
+            const oldCounselorChatId = await this.resolveChatId(pending.fromCounselorId, 'counselor');
+            if (oldCounselorChatId) {
+                await this.bot!.telegram.sendMessage(
+                    oldCounselorChatId,
+                    'No available expert counselor accepted the transfer request.',
+                    this.buildTransferFallbackKeyboard(sessionId)
+                );
+            }
+            return;
+        }
+
+        await this.sendTransferRequestToCandidate(pending);
+        await ctx.reply('Declined. The request has been forwarded to another counselor.');
+    }
+
+    private async handleTransferContinue(ctx: Context, sessionId: string): Promise<void> {
+        if (!ctx.chat) return;
+        this.pendingTransfers.delete(sessionId);
+        this.transferState.delete(ctx.chat.id);
+        await ctx.reply('Continuing the current session.');
+    }
+
+    private async handleTransferWait(ctx: Context, sessionId: string): Promise<void> {
+        if (!ctx.chat) return;
+        this.pendingTransfers.delete(sessionId);
+        this.transferState.delete(ctx.chat.id);
+        await ctx.reply('We will wait for an expert to become available. Try transfer again later.');
+    }
+
+    private async handleTransferEnd(ctx: Context, sessionId: string): Promise<void> {
+        if (!ctx.chat || !this.sessionManager || !this.userManager) return;
+
+        const session = await this.collections?.sessions.findOne({ sessionId });
+        if (!session) {
+            await ctx.reply('Session not found.');
+            return;
+        }
+
+        await this.sessionManager.endSession(sessionId);
+        await ctx.reply('Session ended.');
+
+        const userChatId = await this.resolveChatId(session.userId, 'user');
+        if (userChatId) {
+            await this.bot!.telegram.sendMessage(
+                userChatId,
+                'Your session has ended. Please rate your counselor (1-5). Rating is required to continue.',
+                this.buildRatingKeyboard(sessionId)
+            );
+        }
+        await this.userManager.updateUserState(session.userId, 'RATING_REQUIRED');
+
+        if (this.counselorManager) {
+            try {
+                await this.counselorManager.setAvailability(this.getSessionCounselorId(session), 'available', 'system');
+            } catch (error) {
+                const err = error as Error;
+                logger.warn('Failed to update counselor availability after transfer end', { message: err.message });
+            }
+        }
+
+        this.pendingTransfers.delete(sessionId);
+        this.transferState.delete(ctx.chat.id);
+    }
+
+    private async handleTransferCancel(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        this.transferState.delete(ctx.chat.id);
+        await ctx.reply('Transfer canceled.');
+    }
+
+    private buildTransferReasonKeyboard() {
+        const rows: Array<ReturnType<typeof Markup.button.callback>[]> = [];
+        for (let i = 0; i < BotHandler.TRANSFER_REASONS.length; i += 2) {
+            const left = BotHandler.TRANSFER_REASONS[i];
+            const right = BotHandler.TRANSFER_REASONS[i + 1];
+            const row: ReturnType<typeof Markup.button.callback>[] = [];
+            row.push(Markup.button.callback(left, `${BotHandler.TRANSFER_REASON_ACTION_PREFIX}:${left}`));
+            if (right) {
+                row.push(Markup.button.callback(right, `${BotHandler.TRANSFER_REASON_ACTION_PREFIX}:${right}`));
+            }
+            rows.push(row);
+        }
+        rows.push([Markup.button.callback('❌ Cancel', BotHandler.TRANSFER_CANCEL)]);
+        return Markup.inlineKeyboard(rows);
+    }
+
+    private buildTransferFallbackKeyboard(sessionId: string) {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Continue Session', `${BotHandler.TRANSFER_OPTION_CONTINUE}:${sessionId}`)],
+            [Markup.button.callback('⏳ Wait for Expert', `${BotHandler.TRANSFER_OPTION_WAIT}:${sessionId}`)],
+            [Markup.button.callback('🛑 End Session', `${BotHandler.TRANSFER_OPTION_END}:${sessionId}`)]
+        ]);
+    }
+
+    private async findTransferCandidates(
+        languages: string[],
+        domain: string,
+        excludedCounselorId: string
+    ): Promise<string[]> {
+        if (!this.collections) return [];
+
+        const candidates = await this.collections.counselors.find({
+            status: 'available',
+            isApproved: true,
+            isSuspended: false
+        }).toArray();
+
+        const normalizedLanguages = languages.map(lang => lang.toLowerCase());
+        const normalizedDomain = domain.toLowerCase();
+
+        const filtered = candidates
+            .filter(counselor => counselor.id !== excludedCounselorId)
+            .map(counselor => {
+                const counselorLanguages = (counselor.languagesSpoken ?? []).map((lang: string) => lang.toLowerCase());
+                const counselorDomains = (counselor.domainExpertise ?? []).map((item: string) => item.toLowerCase());
+                const languageMatch = counselorLanguages.some(lang => normalizedLanguages.includes(lang));
+                const domainMatch = counselorDomains.includes(normalizedDomain);
+                return { counselor, languageMatch, domainMatch };
+            })
+            .filter(candidate => candidate.languageMatch && candidate.domainMatch);
+
+        if (filtered.length === 0) {
+            return [];
+        }
+
+        const activeCounts = await Promise.all(
+            filtered.map(candidate =>
+                this.collections!.sessions.countDocuments({
+                    isActive: true,
+                    $or: [
+                        { counselorId: candidate.counselor.id },
+                        { currentCounselorId: candidate.counselor.id }
+                    ]
+                } as unknown as Record<string, unknown>)
+            )
+        );
+
+        const ranked = filtered.map((candidate, index) => ({
+            counselor: candidate.counselor,
+            activeCount: activeCounts[index] ?? 0,
+            ratingAverage: candidate.counselor.ratingAverage ?? 0,
+            lastActive: candidate.counselor.lastActive ?? new Date(0)
+        }));
+
+        ranked.sort((a, b) => {
+            if (a.activeCount !== b.activeCount) {
+                return a.activeCount - b.activeCount;
+            }
+            if (a.ratingAverage !== b.ratingAverage) {
+                return b.ratingAverage - a.ratingAverage;
+            }
+            return b.lastActive.getTime() - a.lastActive.getTime();
+        });
+
+        return ranked.map(item => item.counselor.id);
+    }
+
+    private async sendTransferRequestToCandidate(pending: PendingTransfer): Promise<void> {
+        if (!this.collections || !this.bot) return;
+
+        const candidateId = pending.candidateIds[pending.candidateIndex];
+        const counselor = await this.collections.counselors.findOne({ id: candidateId });
+        if (!counselor?.telegramChatId) {
+            pending.candidateIndex += 1;
+            if (pending.candidateIndex >= pending.candidateIds.length) {
+                this.pendingTransfers.delete(pending.sessionId);
+                const oldCounselorChatId = await this.resolveChatId(pending.fromCounselorId, 'counselor');
+                if (oldCounselorChatId) {
+                    await this.bot.telegram.sendMessage(
+                        oldCounselorChatId,
+                        'No available expert counselor accepted the transfer request.',
+                        this.buildTransferFallbackKeyboard(pending.sessionId)
+                    );
+                }
+                return;
+            }
+            await this.sendTransferRequestToCandidate(pending);
+            return;
+        }
+
+        const message = [
+            'You have a session transfer request.',
+            `Domain: ${pending.domain}`,
+            `Language: ${pending.languages.join(', ')}`,
+            `Reason: ${pending.reason}`
+        ].join('\n');
+
+        await this.bot.telegram.sendMessage(
+            counselor.telegramChatId,
+            message,
+            Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Accept Transfer', `${BotHandler.TRANSFER_ACCEPT_ACTION_PREFIX}:${pending.sessionId}`)],
+                [Markup.button.callback('❌ Decline', `${BotHandler.TRANSFER_DECLINE_ACTION_PREFIX}:${pending.sessionId}`)]
+            ])
+        );
+    }
+
+    private async sendSessionHistoryToCounselor(sessionId: string, counselorId: string, chatId: number): Promise<void> {
+        if (!this.sessionManager || !this.bot) return;
+
+        try {
+            const messages = await this.sessionManager.getMessageHistory(sessionId, counselorId, 'counselor', 50);
+            if (messages.length === 0) {
+                return;
+            }
+
+            const formatted = messages.map(msg => {
+                const senderLabel = msg.senderType === 'user' ? 'User' : 'Counselor';
+                const ts = msg.timestamp instanceof Date
+                    ? msg.timestamp.toISOString()
+                    : new Date(msg.timestamp).toISOString();
+                return `[${ts}] ${senderLabel}: ${msg.content}`;
+            });
+
+            const header = 'Recent chat history (last 50 messages):\n';
+            const TELEGRAM_MAX_LENGTH = 4096;
+            let currentChunk = header;
+
+            for (const line of formatted) {
+                if (currentChunk.length + line.length + 1 > TELEGRAM_MAX_LENGTH) {
+                    await this.bot.telegram.sendMessage(chatId, currentChunk);
+                    currentChunk = '';
+                }
+                currentChunk += (currentChunk ? '\n' : '') + line;
+            }
+
+            if (currentChunk) {
+                await this.bot.telegram.sendMessage(chatId, currentChunk);
+            }
+        } catch (error) {
+            const err = error as Error;
+            logger.warn('Failed to send transfer history', { sessionId, message: err.message });
+        }
+    }
+
+    private async getSessionPreferences(session: Session): Promise<{ languages: string[]; domain?: string }> {
+        if (session.userPreferredLanguage && session.userRequestedDomain) {
+            return { languages: session.userPreferredLanguage, domain: session.userRequestedDomain };
+        }
+
+        if (!this.collections) {
+            return { languages: [] };
+        }
+
+        const user = await this.collections.users.findOne({ uuid: session.userId });
+        const languages = user?.user_preferred_language ?? [];
+        const domain = user?.user_requested_domain;
+        if (domain) {
+            return { languages, domain };
+        }
+        return { languages };
+    }
+
+    private async startMatchingFlow(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+
+        const state: MatchingState = {
+            step: 'language',
+            languages: []
+        };
+
+        this.matchingState.set(ctx.chat.id, state);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'MATCHING');
+        await this.promptMatchingStep(ctx, state);
+    }
+
+    private async handleMatchingText(ctx: Context, text: string): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+
+        const state = this.matchingState.get(ctx.chat.id);
+        if (!state) {
+            await this.startMatchingFlow(ctx);
+            return;
+        }
+
+        const trimmed = text.trim();
+        if (!trimmed) {
+            await this.promptMatchingStep(ctx, state, 'Please enter a valid response.');
+            return;
+        }
+
+        if (state.step === 'language_other') {
+            this.addUniqueSelection(state.languages, trimmed);
+            state.step = 'language';
+            await this.promptMatchingStep(ctx, state, `Added language: ${trimmed}. Select more or tap Done.`);
+            return;
+        }
+
+        if (state.step === 'domain_other') {
+            state.domain = trimmed;
+            state.step = 'consent';
+            await this.userManager.updateUserMatchingPreferences(ctx.chat.id, state.languages, trimmed);
+            await this.promptMatchingStep(ctx, state);
+            return;
+        }
+
+        await ctx.reply('Please use the buttons provided to continue.');
+    }
+
+    private async handleMatchingLanguageSelect(ctx: Context, language: string): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.matchingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (language === 'Other') {
+            state.step = 'language_other';
+            await this.promptMatchingStep(ctx, state);
+            return;
+        }
+
+        this.toggleSelection(state.languages, language);
+        state.step = 'language';
+        await this.promptMatchingStep(ctx, state);
+    }
+
+    private async handleMatchingLanguageDone(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.matchingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (state.languages.length === 0) {
+            await this.promptMatchingStep(ctx, state, 'Please select at least one language.');
+            return;
+        }
+
+        state.step = 'domain';
+        await this.promptMatchingStep(ctx, state);
+    }
+
+    private async handleMatchingDomainSelect(ctx: Context, domain: string): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        const state = this.matchingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (domain === 'Other') {
+            state.step = 'domain_other';
+            await this.promptMatchingStep(ctx, state);
+            return;
+        }
+
+        state.domain = domain;
+        state.step = 'consent';
+        await this.userManager.updateUserMatchingPreferences(ctx.chat.id, state.languages, domain);
+        await this.promptMatchingStep(ctx, state);
+    }
+
+    private async handleMatchingBack(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.matchingState.get(ctx.chat.id);
+        if (!state) return;
+
+        switch (state.step) {
+            case 'language_other':
+                state.step = 'language';
+                break;
+            case 'domain_other':
+                state.step = 'domain';
+                break;
+            case 'domain':
+                state.step = 'language';
+                break;
+            case 'consent':
+                state.step = 'domain';
+                break;
+            case 'language':
+            default:
+                await this.promptMatchingStep(ctx, state, 'You are already at the first step.');
+                return;
+        }
+
+        await this.promptMatchingStep(ctx, state);
+    }
+
+    private async handleMatchingCancel(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        this.matchingState.delete(ctx.chat.id);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', 'Matching canceled.');
+    }
+
+    private async handleMatchingRetryLanguage(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        const state: MatchingState = {
+            step: 'language',
+            languages: []
+        };
+        this.matchingState.set(ctx.chat.id, state);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'MATCHING');
+        await this.promptMatchingStep(ctx, state, 'Select your preferred language(s).');
+    }
+
+    private async handleMatchingWait(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        this.matchingState.delete(ctx.chat.id);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', 'No matching counselors are available right now. Please try again later.');
+    }
+
+    private async promptMatchingStep(ctx: Context, state: MatchingState, message?: string): Promise<void> {
+        if (!ctx.chat || !this.sessionManager) return;
+
+        switch (state.step) {
+            case 'language': {
+                const text = message ?? 'Select your preferred language(s) (multi-select). Tap Done when finished.';
+                await ctx.reply(text, this.buildMatchingLanguageKeyboard(state.languages));
+                return;
+            }
+            case 'language_other': {
+                const text = message ?? 'Please type the language you prefer.';
+                await ctx.reply(text, this.buildMatchingNavKeyboard());
+                return;
+            }
+            case 'domain': {
+                const text = message ?? 'Select your counseling domain (single selection).';
+                await ctx.reply(text, this.buildMatchingDomainKeyboard());
+                return;
+            }
+            case 'domain_other': {
+                const text = message ?? 'Please type the counseling domain you need.';
+                await ctx.reply(text, this.buildMatchingNavKeyboard());
+                return;
+            }
+            case 'consent': {
+                const text = message ?? this.sessionManager.getConsentDisclosureText();
+                await ctx.reply(
+                    text,
+                    Markup.inlineKeyboard([
+                        [Markup.button.callback('✅ Agree and Continue', `${BotHandler.CONSENT_ACTION_PREFIX}:${await this.userManager!.registerUser(ctx.chat.id)}`)],
+                        ...this.buildMatchingNavButtonsRow(true)
+                    ])
+                );
+                return;
+            }
+            default:
+                await ctx.reply('Let\'s continue your session setup.', this.buildMatchingNavKeyboard());
+        }
+    }
+
+    private buildMatchingLanguageKeyboard(selected: string[]) {
+        const rows: Array<ReturnType<typeof Markup.button.callback>[]> = [];
+        const selectedSet = new Set(selected);
+
+        for (let i = 0; i < BotHandler.COUNSELOR_LANGUAGES.length; i += 2) {
+            const left = BotHandler.COUNSELOR_LANGUAGES[i];
+            const right = BotHandler.COUNSELOR_LANGUAGES[i + 1];
+            const row: ReturnType<typeof Markup.button.callback>[] = [];
+            const leftLabel = selectedSet.has(left) ? `✅ ${left}` : left;
+            row.push(Markup.button.callback(leftLabel, `${BotHandler.MATCHING_LANG_ACTION_PREFIX}:${left}`));
+            if (right) {
+                const rightLabel = selectedSet.has(right) ? `✅ ${right}` : right;
+                row.push(Markup.button.callback(rightLabel, `${BotHandler.MATCHING_LANG_ACTION_PREFIX}:${right}`));
+            }
+            rows.push(row);
+        }
+
+        rows.push([Markup.button.callback('✅ Done', BotHandler.MATCHING_LANG_DONE)]);
+        rows.push(...this.buildMatchingNavButtonsRow(true));
+        return Markup.inlineKeyboard(rows);
+    }
+
+    private buildMatchingDomainKeyboard() {
+        const rows: Array<ReturnType<typeof Markup.button.callback>[]> = [];
+        for (let i = 0; i < BotHandler.COUNSELOR_DOMAINS.length; i += 2) {
+            const left = BotHandler.COUNSELOR_DOMAINS[i];
+            const right = BotHandler.COUNSELOR_DOMAINS[i + 1];
+            const row: ReturnType<typeof Markup.button.callback>[] = [];
+            row.push(Markup.button.callback(left, `${BotHandler.MATCHING_DOMAIN_ACTION_PREFIX}:${left}`));
+            if (right) {
+                row.push(Markup.button.callback(right, `${BotHandler.MATCHING_DOMAIN_ACTION_PREFIX}:${right}`));
+            }
+            rows.push(row);
+        }
+
+        rows.push(...this.buildMatchingNavButtonsRow(true));
+        return Markup.inlineKeyboard(rows);
+    }
+
+    private buildMatchingNavButtonsRow(includeBack: boolean): Array<ReturnType<typeof Markup.button.callback>[]> {
+        const row: ReturnType<typeof Markup.button.callback>[] = [];
+        if (includeBack) {
+            row.push(Markup.button.callback('⬅️ Back', BotHandler.MATCHING_BACK));
+        }
+        row.push(Markup.button.callback('❌ Cancel', BotHandler.MATCHING_CANCEL));
+        return [row];
+    }
+
+    private buildMatchingNavKeyboard() {
+        return Markup.inlineKeyboard(this.buildMatchingNavButtonsRow(true));
+    }
+
+    private buildMatchingNoLanguageKeyboard() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('🔁 Choose Another Language', BotHandler.MATCHING_RETRY_LANG)],
+            [Markup.button.callback('⏳ Wait for Counselor', BotHandler.MATCHING_WAIT)]
+        ]);
+    }
+
+    private async findBestCounselorMatch(
+        preferredLanguages: string[],
+        requestedDomain: string,
+        requesterChatId: number
+    ): Promise<{ counselorId: string; counselor: { telegramChatId: number } } | { reason: 'no_language_match' } | null> {
+        if (!this.collections) return null;
+
+        const counselors = await this.collections.counselors.find({
+            status: 'available',
+            isApproved: true,
+            isSuspended: false
+        }).toArray();
+
+        if (counselors.length === 0) {
+            return null;
+        }
+
+        const normalizedLanguages = preferredLanguages.map(lang => lang.toLowerCase());
+        const normalizedDomain = requestedDomain.toLowerCase();
+
+        const candidates = counselors
+            .filter(c => c.telegramChatId !== requesterChatId)
+            .map(counselor => {
+                const counselorLanguages = (counselor.languagesSpoken ?? []).map((lang: string) => lang.toLowerCase());
+                const counselorDomains = (counselor.domainExpertise ?? []).map((domain: string) => domain.toLowerCase());
+                const languageMatchCount = counselorLanguages.filter(lang => normalizedLanguages.includes(lang)).length;
+                const domainMatch = counselorDomains.includes(normalizedDomain);
+                return {
+                    counselor,
+                    languageMatchCount,
+                    domainMatch
+                };
+            })
+            .filter(candidate => candidate.languageMatchCount > 0);
+
+        if (candidates.length === 0) {
+            return { reason: 'no_language_match' };
+        }
+
+        const exactMatches = candidates.filter(candidate => candidate.domainMatch);
+        const pool = exactMatches.length > 0 ? exactMatches : candidates;
+
+        const activeCounts = await Promise.all(
+            pool.map(candidate =>
+                this.collections!.sessions.countDocuments({
+                    counselorId: candidate.counselor.id,
+                    isActive: true
+                })
+            )
+        );
+
+        const ranked = pool.map((candidate, index) => {
+            const ratingAverage = typeof candidate.counselor.ratingAverage === 'number'
+                ? candidate.counselor.ratingAverage
+                : 0;
+            const sessionsHandled = candidate.counselor.sessionsHandled ?? 0;
+            return {
+                ...candidate,
+                activeCount: activeCounts[index] ?? 0,
+                ratingAverage,
+                sessionsHandled
+            };
+        });
+
+        ranked.sort((a, b) => {
+            if (a.domainMatch !== b.domainMatch) {
+                return a.domainMatch ? -1 : 1;
+            }
+            if (a.languageMatchCount !== b.languageMatchCount) {
+                return b.languageMatchCount - a.languageMatchCount;
+            }
+            if (a.activeCount !== b.activeCount) {
+                return a.activeCount - b.activeCount;
+            }
+            if (a.ratingAverage !== b.ratingAverage) {
+                return b.ratingAverage - a.ratingAverage;
+            }
+            return a.sessionsHandled - b.sessionsHandled;
+        });
+
+        const best = ranked[0];
+        return best ? { counselorId: best.counselor.id, counselor: best.counselor } : null;
+    }
+
+    private async findPendingRatingSession(userId: string): Promise<Session | null> {
+        if (!this.collections) return null;
+
+        return this.collections.sessions
+            .find({ userId, isActive: false, ratingScore: { $exists: false } })
+            .sort({ endTime: -1 })
+            .limit(1)
+            .next();
     }
 
     private async startPrayerSubmission(ctx: Context): Promise<void> {
@@ -752,16 +1901,83 @@ export class BotHandler {
         await this.replyWithMenu(ctx, 'IDLE', 'Your prayer request has been received. Counselors will pray for it.');
     }
 
-    private async sendHistory(ctx: Context, page = 1, sessionId?: string): Promise<void> {
-        if (!ctx.chat || !this.sessionManager || !this.userManager) return;
+    private async sendHistory(ctx: Context, page = 1): Promise<void> {
+        await this.handleHistoryList(ctx, page);
+    }
+
+    private async handleHistoryList(ctx: Context, page = 1): Promise<void> {
+        if (!ctx.chat || !this.sessionManager || !this.userManager || !this.collections) return;
 
         await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'VIEWING_HISTORY');
-        const session = sessionId
-            ? await this.collections?.sessions.findOne({ sessionId })
-            : await this.findRecentSessionByChat(ctx.chat.id);
-        if (!session) {
+
+        const { requesterId, requesterType } = await this.resolveRequester(ctx.chat.id);
+        const query = requesterType === 'user'
+            ? { userId: requesterId }
+            : {
+                $or: [
+                    { counselorId: requesterId },
+                    { currentCounselorId: requesterId },
+                    { previousCounselorId: requesterId },
+                    { 'transferHistory.fromCounselorId': requesterId },
+                    { 'transferHistory.toCounselorId': requesterId }
+                ]
+            };
+
+        const sessions = await this.collections.sessions
+            .find(query as unknown as Record<string, unknown>)
+            .sort({ startTime: -1 })
+            .toArray();
+
+        if (sessions.length === 0) {
             await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
             await this.replyWithMenu(ctx, 'IDLE', 'No session history available.');
+            return;
+        }
+
+        const { pageItems, safePage, totalPages } = this.getPagination(sessions, page, BotHandler.PAGE_SIZE);
+
+        await ctx.reply(`Session history (${sessions.length}):`);
+        for (const session of pageItems) {
+            const topic = session.userRequestedDomain ?? 'General Support';
+            const date = this.formatTimestamp(session.startTime);
+            const status = session.isActive
+                ? 'Active'
+                : (session.transferCount ?? 0) > 0
+                    ? 'Transferred'
+                    : 'Completed';
+            const message = [
+                `Session Topic: ${topic}`,
+                `Date: ${date}`,
+                `Status: ${status}`
+            ].join('\n');
+
+            await ctx.reply(
+                message,
+                Markup.inlineKeyboard([
+                    Markup.button.callback(
+                        '💬 See Chat',
+                        `${BotHandler.VIEW_HISTORY_CHAT_ACTION_PREFIX}:${session.sessionId}`
+                    )
+                ])
+            );
+        }
+
+        await this.sendPaginationControls(
+            ctx,
+            BotHandler.PAGINATE_HISTORY_LIST_ACTION_PREFIX,
+            safePage,
+            totalPages
+        );
+    }
+
+    private async sendHistoryChat(ctx: Context, sessionId: string, page = 1): Promise<void> {
+        if (!ctx.chat || !this.sessionManager || !this.userManager || !this.collections) return;
+
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'VIEWING_HISTORY');
+
+        const session = await this.collections.sessions.findOne({ sessionId });
+        if (!session) {
+            await this.replyWithMenu(ctx, 'IDLE', 'Session not found.');
             return;
         }
 
@@ -771,34 +1987,34 @@ export class BotHandler {
             requesterId,
             requesterType,
             page,
-            BotHandler.PAGE_SIZE
+            BotHandler.HISTORY_CHAT_PAGE_SIZE
         );
 
         if (total === 0) {
-            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
-            await this.replyWithMenu(ctx, 'IDLE', 'No messages in session history.');
+            await this.replyWithMenu(ctx, 'IDLE', 'No messages in this session.');
             return;
         }
 
-        const totalPages = Math.max(1, Math.ceil(total / BotHandler.PAGE_SIZE));
+        const totalPages = Math.max(1, Math.ceil(total / BotHandler.HISTORY_CHAT_PAGE_SIZE));
         const safePage = Math.min(Math.max(page, 1), totalPages);
 
         const formatted = messages.map(msg => {
             const senderLabel = msg.senderType === 'user' ? 'User' : 'Counselor';
-            return `[${msg.timestamp.toISOString()}] ${senderLabel}: ${msg.content}`;
+            const timestamp = msg.timestamp instanceof Date
+                ? msg.timestamp.toISOString()
+                : new Date(msg.timestamp).toISOString();
+            return `[${timestamp}] ${senderLabel}: ${msg.content}`;
         });
 
-        await ctx.reply(`Session history (${total}):`);
+        await ctx.reply(`Session chat (${total} messages):`);
         await ctx.reply(formatted.join('\n'));
         await this.sendPaginationControls(
             ctx,
-            BotHandler.PAGINATE_HISTORY_ACTION_PREFIX,
+            BotHandler.PAGINATE_HISTORY_CHAT_ACTION_PREFIX,
             safePage,
             totalPages,
             session.sessionId
         );
-        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
-        await this.replyWithMenu(ctx, 'IDLE', 'Here is your recent history.');
     }
 
     private async startReport(ctx: Context): Promise<void> {
@@ -849,8 +2065,9 @@ export class BotHandler {
             return;
         }
 
-        const report = await this.reportingSystem.submitReport(session.sessionId, session.counselorId, reason);
-        const counselorChatId = await this.resolveChatId(session.counselorId, 'counselor');
+        const sessionCounselorId = this.getSessionCounselorId(session);
+        const report = await this.reportingSystem.submitReport(session.sessionId, sessionCounselorId, reason);
+        const counselorChatId = await this.resolveChatId(sessionCounselorId, 'counselor');
         if (counselorChatId) {
             await this.bot!.telegram.sendMessage(
                 counselorChatId,
@@ -869,16 +2086,494 @@ export class BotHandler {
     }
 
     private async handleRegisterCounselor(ctx: Context): Promise<void> {
-        if (!ctx.chat || !this.collections || !this.counselorManager) return;
+        if (!ctx.chat || !this.collections || !this.counselorManager || !this.userManager) return;
 
         const existing = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
         if (existing) {
-            await ctx.reply(`You are already registered. Counselor ID: ${existing.id}`);
+            const statusMessage = existing.isApproved
+                ? 'You are already registered as a counselor.'
+                : 'Your counselor application is already submitted and pending admin approval.';
+            await ctx.reply(`${statusMessage} Counselor ID: ${existing.id}`);
             return;
         }
 
-        const counselorId = await this.counselorManager.createCounselor(ctx.chat.id);
-        await ctx.reply(`Counselor registration created. Your counselor ID is ${counselorId}. Await admin approval.`);
+        await this.startCounselorOnboarding(ctx);
+    }
+
+    private async startCounselorOnboarding(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+
+        const telegramUsername = ctx.from?.username?.trim();
+        const data: CounselorOnboardingData = {
+            languages: [],
+            domains: []
+        };
+        if (telegramUsername && telegramUsername.length > 0) {
+            data.telegramUsername = telegramUsername;
+        }
+
+        const state: CounselorOnboardingState = {
+            step: 'full_name',
+            data
+        };
+
+        this.counselorOnboardingState.set(ctx.chat.id, state);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'COUNSELOR_ONBOARDING');
+        await this.promptCounselorOnboardingStep(ctx, state);
+    }
+
+    private async handleCounselorOnboardingText(ctx: Context, text: string): Promise<void> {
+        if (!ctx.chat) return;
+
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) {
+            await this.startCounselorOnboarding(ctx);
+            return;
+        }
+
+        const trimmed = text.trim();
+
+        switch (state.step) {
+            case 'full_name':
+                if (!trimmed) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter your full name.');
+                    return;
+                }
+                state.data.fullName = trimmed;
+                state.step = 'telegram_username';
+                if (state.data.telegramUsername) {
+                    const username = this.formatTelegramUsername(state.data.telegramUsername);
+                    state.step = 'languages';
+                    await this.promptCounselorOnboardingStep(
+                        ctx,
+                        state,
+                        `Telegram username detected: ${username}. Now select languages you speak.`
+                    );
+                } else {
+                    await this.promptCounselorOnboardingStep(ctx, state);
+                }
+                return;
+            case 'telegram_username':
+                if (!trimmed) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter your Telegram username.');
+                    return;
+                }
+                state.data.telegramUsername = this.normalizeTelegramUsername(trimmed);
+                state.step = 'languages';
+                await this.promptCounselorOnboardingStep(ctx, state);
+                return;
+            case 'languages_other':
+                if (!trimmed) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter the language name.');
+                    return;
+                }
+                this.addUniqueSelection(state.data.languages, trimmed);
+                state.step = 'languages';
+                await this.promptCounselorOnboardingStep(ctx, state, `Added language: ${trimmed}. Select more or tap Done.`);
+                return;
+            case 'domains_other':
+                if (!trimmed) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter the domain name.');
+                    return;
+                }
+                this.addUniqueSelection(state.data.domains, trimmed);
+                state.step = 'domains';
+                await this.promptCounselorOnboardingStep(ctx, state, `Added domain: ${trimmed}. Select more or tap Done.`);
+                return;
+            case 'experience': {
+                const years = Number.parseInt(trimmed, 10);
+                if (!Number.isFinite(years) || years <= 0) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter a positive number for years of experience.');
+                    return;
+                }
+                state.data.yearsExperience = years;
+                state.step = 'country';
+                await this.promptCounselorOnboardingStep(ctx, state);
+                return;
+            }
+            case 'country':
+                if (!trimmed) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter your country.');
+                    return;
+                }
+                state.data.country = trimmed;
+                state.step = 'location';
+                await this.promptCounselorOnboardingStep(ctx, state);
+                return;
+            case 'location':
+                if (!trimmed) {
+                    await this.promptCounselorOnboardingStep(ctx, state, 'Please enter your city or region.');
+                    return;
+                }
+                state.data.location = trimmed;
+                state.step = 'confirm';
+                await this.promptCounselorOnboardingStep(ctx, state);
+                return;
+            case 'languages':
+            case 'domains':
+            case 'confirm':
+                await ctx.reply('Please use the buttons provided to continue.');
+                return;
+            default:
+                await this.promptCounselorOnboardingStep(ctx, state);
+        }
+    }
+
+    private async handleCounselorOnboardingLanguageSelect(ctx: Context, language: string): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (language === 'Other') {
+            state.step = 'languages_other';
+            await this.promptCounselorOnboardingStep(ctx, state);
+            return;
+        }
+
+        this.toggleSelection(state.data.languages, language);
+        state.step = 'languages';
+        await this.promptCounselorOnboardingStep(ctx, state);
+    }
+
+    private async handleCounselorOnboardingDomainSelect(ctx: Context, domain: string): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (domain === 'Other') {
+            state.step = 'domains_other';
+            await this.promptCounselorOnboardingStep(ctx, state);
+            return;
+        }
+
+        this.toggleSelection(state.data.domains, domain);
+        state.step = 'domains';
+        await this.promptCounselorOnboardingStep(ctx, state);
+    }
+
+    private async handleCounselorOnboardingLanguagesDone(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (state.data.languages.length === 0) {
+            state.step = 'languages';
+            await this.promptCounselorOnboardingStep(ctx, state, 'Please select at least one language.');
+            return;
+        }
+
+        state.step = 'domains';
+        await this.promptCounselorOnboardingStep(ctx, state);
+    }
+
+    private async handleCounselorOnboardingDomainsDone(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) return;
+
+        if (state.data.domains.length === 0) {
+            state.step = 'domains';
+            await this.promptCounselorOnboardingStep(ctx, state, 'Please select at least one domain.');
+            return;
+        }
+
+        state.step = 'experience';
+        await this.promptCounselorOnboardingStep(ctx, state);
+    }
+
+    private async handleCounselorOnboardingBack(ctx: Context): Promise<void> {
+        if (!ctx.chat) return;
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) return;
+
+        switch (state.step) {
+            case 'languages_other':
+                state.step = 'languages';
+                break;
+            case 'domains_other':
+                state.step = 'domains';
+                break;
+            case 'confirm':
+                state.step = 'location';
+                break;
+            case 'location':
+                state.step = 'country';
+                break;
+            case 'country':
+                state.step = 'experience';
+                break;
+            case 'experience':
+                state.step = 'domains';
+                break;
+            case 'domains':
+                state.step = 'languages';
+                break;
+            case 'languages':
+                state.step = 'telegram_username';
+                break;
+            case 'telegram_username':
+                state.step = 'full_name';
+                break;
+            case 'full_name':
+                await this.promptCounselorOnboardingStep(ctx, state, 'You are already at the first step.');
+                return;
+            default:
+                state.step = 'full_name';
+        }
+
+        await this.promptCounselorOnboardingStep(ctx, state);
+    }
+
+    private async handleCounselorOnboardingCancel(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager) return;
+        this.counselorOnboardingState.delete(ctx.chat.id);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+        await this.replyWithMenu(ctx, 'IDLE', 'Counselor registration canceled.');
+    }
+
+    private async handleCounselorOnboardingConfirm(ctx: Context): Promise<void> {
+        if (!ctx.chat || !this.userManager || !this.collections || !this.counselorManager || !this.bot) return;
+
+        const state = this.counselorOnboardingState.get(ctx.chat.id);
+        if (!state) return;
+
+        const existing = await this.collections.counselors.findOne({ telegramChatId: ctx.chat.id });
+        if (existing) {
+            this.counselorOnboardingState.delete(ctx.chat.id);
+            await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+            await this.replyWithMenu(ctx, 'IDLE', 'You are already registered as a counselor.');
+            return;
+        }
+
+        const { fullName, telegramUsername, languages, domains, yearsExperience, country, location } = state.data;
+        if (!fullName || !telegramUsername || languages.length === 0 || domains.length === 0 || !yearsExperience || !country || !location) {
+            this.counselorOnboardingState.delete(ctx.chat.id);
+            await ctx.reply('Some information was missing, so the onboarding has been restarted.');
+            await this.startCounselorOnboarding(ctx);
+            return;
+        }
+
+        const counselorId = await this.counselorManager.createCounselor(ctx.chat.id, {
+            fullName,
+            telegramUsername,
+            languagesSpoken: languages,
+            domainExpertise: domains,
+            yearsExperience,
+            country,
+            location
+        });
+
+        const formattedUsername = this.formatTelegramUsername(telegramUsername);
+        const adminMessage = [
+            '🧑‍⚕️ New Counselor Application',
+            `ID: ${counselorId}`,
+            `Full Name: ${fullName}`,
+            `Telegram: ${formattedUsername}`,
+            `Languages: ${languages.join(', ')}`,
+            `Expertise: ${domains.join(', ')}`,
+            `Experience: ${yearsExperience} years`,
+            `Country: ${country}`,
+            `Location: ${location}`,
+            'Status: Pending Admin Approval'
+        ].join('\n');
+
+        for (const adminChatId of this.config.adminChatIds) {
+            try {
+                await this.bot.telegram.sendMessage(
+                    adminChatId,
+                    adminMessage,
+                    Markup.inlineKeyboard([
+                        Markup.button.callback(
+                            '✅ Approve Counselor',
+                            `${BotHandler.APPROVE_COUNSELOR_ACTION_PREFIX}:${counselorId}`
+                        )
+                    ])
+                );
+            } catch (error) {
+                const err = error as Error;
+                logger.warn('Failed to notify admin about counselor application', {
+                    counselorId,
+                    message: err.message
+                });
+            }
+        }
+
+        this.counselorOnboardingState.delete(ctx.chat.id);
+        await this.userManager.updateUserStateByTelegramId(ctx.chat.id, 'IDLE');
+        await this.replyWithMenu(
+            ctx,
+            'IDLE',
+            `Your counselor application has been submitted. Counselor ID: ${counselorId}. Status: Pending Admin Approval.`
+        );
+    }
+
+    private async promptCounselorOnboardingStep(
+        ctx: Context,
+        state: CounselorOnboardingState,
+        message?: string
+    ): Promise<void> {
+        if (!ctx.chat) return;
+
+        switch (state.step) {
+            case 'full_name': {
+                const text = message ?? 'Please enter your full name.';
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'telegram_username': {
+                const current = state.data.telegramUsername
+                    ? `Current: ${this.formatTelegramUsername(state.data.telegramUsername)}`
+                    : undefined;
+                const text = message ?? [
+                    'Please enter your Telegram username.',
+                    current ? current : ''
+                ].filter(Boolean).join('\n');
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'languages': {
+                const text = message ?? 'Select the languages you speak (multi-select). Tap Done when finished.';
+                await ctx.reply(
+                    text,
+                    this.buildOnboardingMultiSelectKeyboard(
+                        BotHandler.COUNSELOR_LANGUAGES,
+                        state.data.languages,
+                        BotHandler.COUNSELOR_ONBOARDING_LANG_ACTION_PREFIX,
+                        BotHandler.COUNSELOR_ONBOARDING_LANG_DONE
+                    )
+                );
+                return;
+            }
+            case 'languages_other': {
+                const text = message ?? 'Please type the other language you speak.';
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'domains': {
+                const text = message ?? 'Select your counseling domain expertise (multi-select). Tap Done when finished.';
+                await ctx.reply(
+                    text,
+                    this.buildOnboardingMultiSelectKeyboard(
+                        BotHandler.COUNSELOR_DOMAINS,
+                        state.data.domains,
+                        BotHandler.COUNSELOR_ONBOARDING_DOMAIN_ACTION_PREFIX,
+                        BotHandler.COUNSELOR_ONBOARDING_DOMAIN_DONE
+                    )
+                );
+                return;
+            }
+            case 'domains_other': {
+                const text = message ?? 'Please type the other counseling domain.';
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'experience': {
+                const text = message ?? 'How many years of counseling experience do you have? (number only)';
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'country': {
+                const text = message ?? 'Please enter your country.';
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'location': {
+                const text = message ?? 'Please enter your city or region.';
+                await ctx.reply(text, Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+                return;
+            }
+            case 'confirm': {
+                const summary = this.buildCounselorOnboardingSummary(state.data);
+                const text = message ?? `${summary}\n\nConfirm submission?`;
+                await ctx.reply(text, this.buildOnboardingConfirmKeyboard());
+                return;
+            }
+            default:
+                await ctx.reply('Let\'s continue your counselor application.', Markup.inlineKeyboard(this.buildOnboardingNavButtons()));
+        }
+    }
+
+    private buildOnboardingNavButtons(includeBack = true): Array<ReturnType<typeof Markup.button.callback>[]> {
+        const row: ReturnType<typeof Markup.button.callback>[] = [];
+        if (includeBack) {
+            row.push(Markup.button.callback('⬅️ Back', BotHandler.COUNSELOR_ONBOARDING_BACK));
+        }
+        row.push(Markup.button.callback('❌ Cancel', BotHandler.COUNSELOR_ONBOARDING_CANCEL));
+        return [row];
+    }
+
+    private buildOnboardingMultiSelectKeyboard(
+        options: string[],
+        selected: string[],
+        togglePrefix: string,
+        doneAction: string
+    ) {
+        const rows: Array<ReturnType<typeof Markup.button.callback>[]> = [];
+        const selectedSet = new Set(selected);
+
+        for (let i = 0; i < options.length; i += 2) {
+            const left = options[i];
+            const right = options[i + 1];
+            const row: ReturnType<typeof Markup.button.callback>[] = [];
+            const leftLabel = selectedSet.has(left) ? `✅ ${left}` : left;
+            row.push(Markup.button.callback(leftLabel, `${togglePrefix}:${left}`));
+            if (right) {
+                const rightLabel = selectedSet.has(right) ? `✅ ${right}` : right;
+                row.push(Markup.button.callback(rightLabel, `${togglePrefix}:${right}`));
+            }
+            rows.push(row);
+        }
+
+        rows.push([Markup.button.callback('✅ Done', doneAction)]);
+        rows.push(...this.buildOnboardingNavButtons());
+
+        return Markup.inlineKeyboard(rows);
+    }
+
+    private buildOnboardingConfirmKeyboard() {
+        return Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Submit Application', BotHandler.COUNSELOR_ONBOARDING_CONFIRM)],
+            ...this.buildOnboardingNavButtons()
+        ]);
+    }
+
+    private buildCounselorOnboardingSummary(data: CounselorOnboardingData): string {
+        const telegram = data.telegramUsername ? this.formatTelegramUsername(data.telegramUsername) : 'N/A';
+        return [
+            '🧑‍⚕️ Counselor Application Summary',
+            `Full Name: ${data.fullName ?? 'N/A'}`,
+            `Telegram: ${telegram}`,
+            `Languages: ${data.languages.join(', ') || 'N/A'}`,
+            `Expertise: ${data.domains.join(', ') || 'N/A'}`,
+            `Experience: ${data.yearsExperience ?? 'N/A'} years`,
+            `Country: ${data.country ?? 'N/A'}`,
+            `Location: ${data.location ?? 'N/A'}`
+        ].join('\n');
+    }
+
+    private toggleSelection(values: string[], value: string): void {
+        const index = values.indexOf(value);
+        if (index >= 0) {
+            values.splice(index, 1);
+            return;
+        }
+        values.push(value);
+    }
+
+    private addUniqueSelection(values: string[], value: string): void {
+        if (!values.includes(value)) {
+            values.push(value);
+        }
+    }
+
+    private normalizeTelegramUsername(value: string): string {
+        const trimmed = value.trim();
+        return trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+    }
+
+    private formatTelegramUsername(value: string): string {
+        const normalized = this.normalizeTelegramUsername(value);
+        return normalized ? `@${normalized}` : value;
     }
 
     private async handleMyStats(ctx: Context): Promise<void> {
@@ -1789,7 +3484,8 @@ export class BotHandler {
             '/available | /away - Set counselor availability',
             '/my_stats - View counselor statistics',
             '/list_of_prayer_requests - View prayer requests',
-            '/close_prayer <prayerId> - Close a prayer request'
+            '/close_prayer <prayerId> - Close a prayer request',
+            '🔁 Transfer Session to Expert - Transfer an active session (menu)'
         ];
 
         const adminCommands = [
@@ -2029,6 +3725,10 @@ export class BotHandler {
         return counselor?.telegramChatId ?? null;
     }
 
+    private getSessionCounselorId(session: Session): string {
+        return session.currentCounselorId ?? session.counselorId;
+    }
+
     private async findActiveSessionByChat(chatId: number): Promise<Session | null> {
         if (!this.sessionManager) {
             throw new Error('BotHandler not initialized.');
@@ -2048,7 +3748,7 @@ export class BotHandler {
         const counselor = await this.collections.counselors.findOne({ telegramChatId: chatId });
         if (counselor) {
             return this.collections.sessions
-                .find({ counselorId: counselor.id })
+                .find({ $or: [{ counselorId: counselor.id }, { currentCounselorId: counselor.id }] } as unknown as Record<string, unknown>)
                 .sort({ startTime: -1 })
                 .limit(1)
                 .next();
@@ -2133,13 +3833,13 @@ export class BotHandler {
             [BotHandler.MENU_STATUS_AVAILABLE, BotHandler.MENU_STATUS_AWAY],
             [BotHandler.MENU_MY_STATS],
             [BotHandler.MENU_PRAYER_REQUESTS],
-            [BotHandler.MENU_CLOSE_PRAYER]
+            [BotHandler.MENU_CLOSE_PRAYER],
+            [BotHandler.MENU_TRANSFER_SESSION]
         ];
 
         const adminRows = [
             [BotHandler.MENU_ADMIN_STATS],
             [BotHandler.MENU_PENDING_REPORTS],
-            [BotHandler.MENU_PROCESS_REPORT],
             [BotHandler.MENU_COUNSELOR_LIST],
             [BotHandler.MENU_APPEALS],
             [BotHandler.MENU_APPROVE_COUNSELOR],
@@ -2216,6 +3916,7 @@ export class BotHandler {
             || text === BotHandler.MENU_MY_STATS
             || text === BotHandler.MENU_PRAYER_REQUESTS
             || text === BotHandler.MENU_CLOSE_PRAYER
+            || text === BotHandler.MENU_TRANSFER_SESSION
             || text === BotHandler.MENU_ADMIN_STATS
             || text === BotHandler.MENU_PENDING_REPORTS
             || text === BotHandler.MENU_PROCESS_REPORT
