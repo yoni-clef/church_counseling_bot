@@ -1,11 +1,11 @@
 import { Collections } from '../database/Collections';
-import { Counselor } from '../types/Counselor';
+import { Counselor, CounselorStatus } from '../types/Counselor';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface CounselorStats {
     counselorId: string;
     sessionsHandled: number;
-    status: 'available' | 'busy' | 'away';
+    status: CounselorStatus;
     isApproved: boolean;
     strikes: number;
     isSuspended: boolean;
@@ -14,8 +14,8 @@ export interface CounselorStats {
 
 export interface StatusChangeAudit {
     counselorId: string;
-    previousStatus: 'available' | 'busy' | 'away';
-    newStatus: 'available' | 'busy' | 'away';
+    previousStatus: CounselorStatus;
+    newStatus: CounselorStatus;
     changedBy: string;
     timestamp: Date;
 }
@@ -240,7 +240,7 @@ export class CounselorManager {
      */
     async listCounselors(): Promise<Array<{
         counselorId: string;
-        status: 'available' | 'busy' | 'away';
+        status: CounselorStatus;
         isApproved: boolean;
         sessionsHandled: number;
         strikes: number;
@@ -283,20 +283,53 @@ export class CounselorManager {
     /**
      * Create a new counselor record
      */
-    async createCounselor(telegramChatId: number): Promise<string> {
+    async createCounselor(
+        telegramChatId: number,
+        details?: {
+            fullName?: string;
+            telegramUsername?: string;
+            languagesSpoken?: string[];
+            domainExpertise?: string[];
+            yearsExperience?: number;
+            country?: string;
+            location?: string;
+        }
+    ): Promise<string> {
         const counselorId = uuidv4();
+        const now = new Date();
         const counselor: Counselor & { is_approved: boolean } = {
             id: counselorId,
             telegramChatId,
-            status: 'away',
+            status: 'Pending Admin Approval',
             isApproved: false,
             is_approved: false,
             strikes: 0,
             isSuspended: false,
             sessionsHandled: 0,
-            createdAt: new Date(),
-            lastActive: new Date()
+            ratingCount: 0,
+            ratingTotal: 0,
+            ratingAverage: 0,
+            createdAt: now,
+            lastActive: now,
+            languagesSpoken: details?.languagesSpoken ?? [],
+            domainExpertise: details?.domainExpertise ?? []
         };
+
+        if (details?.fullName) {
+            counselor.fullName = details.fullName;
+        }
+        if (details?.telegramUsername) {
+            counselor.telegramUsername = details.telegramUsername;
+        }
+        if (typeof details?.yearsExperience === 'number') {
+            counselor.yearsExperience = details.yearsExperience;
+        }
+        if (details?.country) {
+            counselor.country = details.country;
+        }
+        if (details?.location) {
+            counselor.location = details.location;
+        }
 
         await this.collections.counselors.insertOne(counselor);
         return counselorId;
