@@ -283,4 +283,19 @@ export class SessionManager {
 
         return { messages, total };
     }
+
+    /**
+     * Retrieve full message history for a session (admin only, for report review)
+     */
+    async getMessageHistoryForAdmin(sessionId: string): Promise<Message[]> {
+        const session = await this.collections.sessions.findOne({ sessionId });
+        if (!session) {
+            throw new Error('Session not found.');
+        }
+
+        return this.collections.messages
+            .find({ sessionId })
+            .sort({ timestamp: 1 })
+            .toArray();
+    }
 }
