@@ -61,11 +61,19 @@ export class SessionManager {
             sessionId: generateSessionId(),
             userId,
             counselorId,
+            currentCounselorId: counselorId,
             startTime: now,
             isActive: true,
             consentGiven: true,
-            consentTimestamp: now
+            consentTimestamp: now,
+            userPreferredLanguage: user.user_preferred_language ?? [],
+            transferCount: 0,
+            transferHistory: []
         };
+
+        if (user.user_requested_domain) {
+            session.userRequestedDomain = user.user_requested_domain;
+        }
 
         await this.collections.sessions.insertOne(session);
 
@@ -94,8 +102,9 @@ export class SessionManager {
             { $set: { isActive: false, endTime, duration } }
         );
 
+        const currentCounselorId = this.getCurrentCounselorId(session);
         await this.collections.counselors.updateOne(
-            { id: session.counselorId },
+            { id: currentCounselorId },
             {
                 $set: { status: 'available', lastActive: endTime },
                 $inc: { sessionsHandled: 1 }
@@ -108,6 +117,61 @@ export class SessionManager {
             endTime,
             duration
         };
+    }
+
+    /**
+     * Record a user rating for a completed session
+     */
+    async rateSession(sessionId: string, userId: string, ratingScore: number): Promise<Session> {
+        if (!Number.isInteger(ratingScore) || ratingScore < 1 || ratingScore > 5) {
+            throw new Error('Rating must be a number between 1 and 5.');
+        }
+
+        const session = await this.collections.sessions.findOne({ sessionId });
+        if (!session) {
+            throw new Error('Session not found.');
+        }
+
+        if (session.userId !== userId) {
+            throw new Error('User is not authorized to rate this session.');
+        }
+
+        if (session.isActive) {
+            throw new Error('Cannot rate an active session.');
+        }
+
+        if (typeof session.ratingScore === 'number') {
+            return session as Session;
+        }
+
+        const ratingTimestamp = new Date();
+        await this.collections.sessions.updateOne(
+            { sessionId },
+            { $set: { ratingScore, ratingTimestamp } }
+        );
+
+        const counselorId = this.getCurrentCounselorId(session);
+        const counselor = await this.collections.counselors.findOne({ id: counselorId });
+        if (counselor) {
+            const ratingCount = counselor.ratingCount ?? 0;
+            const ratingTotal = counselor.ratingTotal ?? 0;
+            const newCount = ratingCount + 1;
+            const newTotal = ratingTotal + ratingScore;
+            const newAverage = newTotal / newCount;
+
+            await this.collections.counselors.updateOne(
+                { id: counselorId },
+                {
+                    $set: {
+                        ratingCount: newCount,
+                        ratingTotal: newTotal,
+                        ratingAverage: newAverage
+                    }
+                }
+            );
+        }
+
+        return { ...session, ratingScore, ratingTimestamp } as Session;
     }
 
     /**
@@ -131,7 +195,10 @@ export class SessionManager {
      * Requirements: 4.4
      */
     async terminateActiveSessionsForCounselor(counselorId: string): Promise<number> {
-        const activeSessions = await this.collections.sessions.find({ counselorId, isActive: true }).toArray();
+        const activeSessions = await this.collections.sessions.find({
+            isActive: true,
+            $or: [{ counselorId }, { currentCounselorId: counselorId }]
+        } as unknown as Record<string, unknown>).toArray();
         let terminatedCount = 0;
 
         for (const session of activeSessions) {
@@ -155,7 +222,10 @@ export class SessionManager {
      * Requirements: 4.1
      */
     async getActiveSessionForCounselor(counselorId: string): Promise<Session | null> {
-        return this.collections.sessions.findOne({ counselorId, isActive: true });
+        return this.collections.sessions.findOne({
+            isActive: true,
+            $or: [{ counselorId }, { currentCounselorId: counselorId }]
+        } as unknown as Record<string, unknown>);
     }
 
     /**
@@ -168,11 +238,13 @@ export class SessionManager {
             throw new Error('Active session not found.');
         }
 
+        const currentCounselorId = this.getCurrentCounselorId(session);
+
         if (senderType === 'user' && senderId !== session.userId) {
             throw new Error('User is not authorized for this session.');
         }
 
-        if (senderType === 'counselor' && senderId !== session.counselorId) {
+        if (senderType === 'counselor' && senderId !== currentCounselorId) {
             throw new Error('Counselor is not authorized for this session.');
         }
 
@@ -211,7 +283,8 @@ export class SessionManager {
         }
 
         const recipientType: SenderType = senderType === 'user' ? 'counselor' : 'user';
-        const recipientId = senderType === 'user' ? session.counselorId : session.userId;
+        const currentCounselorId = this.getCurrentCounselorId(session);
+        const recipientId = senderType === 'user' ? currentCounselorId : session.userId;
 
         return { message, recipientId, recipientType };
     }
@@ -232,7 +305,7 @@ export class SessionManager {
         }
 
         const isAuthorizedUser = requesterType === 'user' && requesterId === session.userId;
-        const isAuthorizedCounselor = requesterType === 'counselor' && requesterId === session.counselorId;
+        const isAuthorizedCounselor = requesterType === 'counselor' && this.isCounselorParticipant(session as Session, requesterId);
 
         if (!isAuthorizedUser && !isAuthorizedCounselor) {
             throw new Error('Requester is not authorized to view this session history.');
@@ -261,7 +334,7 @@ export class SessionManager {
         }
 
         const isAuthorizedUser = requesterType === 'user' && requesterId === session.userId;
-        const isAuthorizedCounselor = requesterType === 'counselor' && requesterId === session.counselorId;
+        const isAuthorizedCounselor = requesterType === 'counselor' && this.isCounselorParticipant(session as Session, requesterId);
 
         if (!isAuthorizedUser && !isAuthorizedCounselor) {
             throw new Error('Requester is not authorized to view this session history.');
@@ -297,5 +370,73 @@ export class SessionManager {
             .find({ sessionId })
             .sort({ timestamp: 1 })
             .toArray();
+    }
+
+    async transferSession(
+        sessionId: string,
+        fromCounselorId: string,
+        toCounselorId: string,
+        reason: string
+    ): Promise<Session> {
+        const session = await this.collections.sessions.findOne({ sessionId });
+        if (!session) {
+            throw new Error('Session not found.');
+        }
+
+        const currentCounselorId = this.getCurrentCounselorId(session as Session);
+        if (currentCounselorId !== fromCounselorId) {
+            throw new Error('Counselor is not assigned to this session.');
+        }
+
+        const transferTimestamp = new Date();
+        const transferEntry = {
+            fromCounselorId,
+            toCounselorId,
+            reason,
+            timestamp: transferTimestamp
+        };
+
+        await this.collections.sessions.updateOne(
+            { sessionId },
+            {
+                $set: {
+                    currentCounselorId: toCounselorId,
+                    previousCounselorId: fromCounselorId,
+                    transferReason: reason,
+                    transferTimestamp
+                },
+                $inc: { transferCount: 1 },
+                $push: { transferHistory: transferEntry }
+            }
+        );
+
+        return {
+            ...(session as Session),
+            currentCounselorId: toCounselorId,
+            previousCounselorId: fromCounselorId,
+            transferReason: reason,
+            transferTimestamp,
+            transferCount: (session.transferCount ?? 0) + 1,
+            transferHistory: [...(session.transferHistory ?? []), transferEntry]
+        };
+    }
+
+    private getCurrentCounselorId(session: Session): string {
+        return session.currentCounselorId ?? session.counselorId;
+    }
+
+    private isCounselorParticipant(session: Session, counselorId: string): boolean {
+        if (session.counselorId === counselorId) {
+            return true;
+        }
+        if (session.currentCounselorId === counselorId) {
+            return true;
+        }
+        if (session.previousCounselorId === counselorId) {
+            return true;
+        }
+
+        const history = session.transferHistory ?? [];
+        return history.some(entry => entry.fromCounselorId === counselorId || entry.toCounselorId === counselorId);
     }
 }
