@@ -114,6 +114,18 @@ export class UserManager {
         );
     }
 
+    async updateUserMatchingPreferences(telegramId: number, languages: string[], domain: string): Promise<void> {
+        await this.collections.users.updateOne(
+            { telegramChatId: telegramId },
+            {
+                $set: {
+                    user_preferred_language: languages,
+                    user_requested_domain: domain
+                }
+            }
+        );
+    }
+
     async getUserState(userId: string): Promise<UserState | null> {
         const user = await this.collections.users.findOne({ uuid: userId });
         return user?.state ?? 'IDLE';
