@@ -73,6 +73,9 @@ describe('CounselorManager Property Tests', () => {
                     strikes: 0,
                     isSuspended: false,
                     sessionsHandled: 0,
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0,
                     createdAt: new Date(),
                     lastActive: new Date()
                 };
@@ -123,6 +126,9 @@ describe('CounselorManager Property Tests', () => {
                     status: data.status as 'available' | 'busy' | 'away',
                     strikes: 0,
                     sessionsHandled: 0,
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0,
                     createdAt: new Date(),
                     lastActive: new Date()
                 }));
@@ -176,6 +182,9 @@ describe('CounselorManager Property Tests', () => {
                     strikes: 0,
                     isSuspended: false,
                     sessionsHandled: 0,
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0,
                     createdAt: new Date(),
                     lastActive: new Date()
                 };
@@ -215,6 +224,9 @@ describe('CounselorManager Property Tests', () => {
                     strikes: 0,
                     isSuspended: false,
                     sessionsHandled: 0,
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0,
                     createdAt: new Date(),
                     lastActive: new Date()
                 };
@@ -266,6 +278,9 @@ describe('CounselorManager Property Tests', () => {
                     strikes: 0,
                     isSuspended: initialSuspension,
                     sessionsHandled: 0,
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0,
                     createdAt: new Date(),
                     lastActive: new Date()
                 };
@@ -316,6 +331,9 @@ describe('CounselorManager Property Tests', () => {
                     strikes: 0,
                     isSuspended: false,
                     sessionsHandled: 0,
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0,
                     createdAt: new Date(),
                     lastActive: new Date()
                 };
@@ -395,7 +413,10 @@ describe('CounselorManager Property Tests', () => {
                     telegramChatId: data.telegramChatId + index,
                     status: data.status as 'available' | 'busy' | 'away',
                     createdAt: new Date(),
-                    lastActive: new Date()
+                    lastActive: new Date(),
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0
                 }));
 
                 await collections.counselors.insertMany(counselors);
@@ -454,7 +475,10 @@ describe('CounselorManager Property Tests', () => {
                     telegramChatId: data.telegramChatId + index,
                     status: data.status as 'available' | 'busy' | 'away',
                     createdAt: new Date(),
-                    lastActive: new Date()
+                    lastActive: new Date(),
+                    ratingCount: 0,
+                    ratingTotal: 0,
+                    ratingAverage: 0
                 }));
 
                 await collections.counselors.insertMany(counselors);
