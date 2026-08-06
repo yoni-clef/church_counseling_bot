@@ -10,13 +10,12 @@ async function main() {
         console.log('Starting Telegram Counseling Bot...');
         console.log(`Environment: ${config.nodeEnv}`);
         console.log(`Database: ${config.mongodbDbName}`);
-
         // Initialize bot handler
         const botHandler = new BotHandler(config);
         await botHandler.initialize();
-
         console.log('Bot started successfully!');
-
+        
+        
         // Handle graceful shutdown
         process.on('SIGINT', async () => {
             console.log('Shutting down bot...');
